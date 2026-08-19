@@ -5,16 +5,21 @@ Identique à l'original, SAUF :
     vers ton PC au lieu d'un calcul local)
   - ajout de la gestion de FaceServerIndisponible -> 503, pour ne pas
     planter bêtement si ton PC/tunnel est down pendant l'expo.
+  - /enroll/{employe_id} n'utilise plus require_admin (JWT qui expire au
+    bout d'1h) mais un secret statique X-Ecran-Secret, comme l'écran
+    kiosque (voir app/routers/candidats.py::tache_active_ecran). Doit
+    correspondre à settings.ECRAN_SHARED_SECRET.
 Tout le reste (roulette, DB, websockets, logique carte+visage) est
 inchangé.
 """
 import random
 from datetime import date, datetime
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.face_client import (
     SEUIL_DEFAUT,
     AucunVisageDetecte,
@@ -41,12 +46,20 @@ from app.db.models import (
 router = APIRouter(prefix="/api/biometrie", tags=["biometrie"])
 
 
-@router.post("/enroll/{employe_id}", dependencies=[Depends(require_admin)])
+def _verifier_secret_ecran(x_ecran_secret: str | None):
+    if x_ecran_secret != settings.ECRAN_SHARED_SECRET:
+        raise HTTPException(status_code=401, detail="Secret écran invalide")
+
+
+@router.post("/enroll/{employe_id}")
 async def enroll_visage(
     employe_id: int,
     photo: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
+    x_ecran_secret: str | None = Header(default=None),
 ):
+    _verifier_secret_ecran(x_ecran_secret)
+
     employe = await db.get(Employe, employe_id)
     if not employe:
         raise HTTPException(404, "Employé non trouvé")
