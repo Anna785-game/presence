@@ -15,6 +15,7 @@ from app.routers import (
     presences,
     simulation,   
     ws,
+    presences_live_and_parcours,
 )
 
 app = FastAPI(title="Système de Sécurité et Pointage API", version="1.0.0")
@@ -40,6 +41,7 @@ app.include_router(candidats.router)
 app.include_router(simulation.router)  
 app.include_router(ws.router)
 app.include_router(biometrie.router) 
+app.include_router(presences_live_and_parcours.router) 
 
 
 @app.get("/health")

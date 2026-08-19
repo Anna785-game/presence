@@ -13,7 +13,7 @@ Tout le reste (roulette, DB, websockets, logique carte+visage) est
 inchangé.
 """
 import random
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
 from sqlalchemy import select
@@ -199,48 +199,125 @@ async def verifier_visage(
 
     aujourdhui = date.today()
     heure_actuelle = datetime.now().time()
+    heure_str = heure_actuelle.strftime("%H:%M:%S")
+
+    heure_entree_str = None
+    duree_minutes = None
 
     if not carte.isentree:
+        # ---------- ENTRÉE ----------
         action = "entree"
-        entree = PresenceEntree(id_employe=employe.id, date=aujourdhui, heure_entree=heure_actuelle, ack=True)
+        entree = PresenceEntree(
+            id_employe=employe.id,
+            date=aujourdhui,
+            heure_entree=heure_actuelle,
+            ack=True,
+        )
         carte.isentree = True
 
         presence = (
             await db.execute(
-                select(Presence).where(Presence.id_employe == employe.id, Presence.datedujour == aujourdhui)
+                select(Presence).where(
+                    Presence.id_employe == employe.id,
+                    Presence.datedujour == aujourdhui,
+                )
             )
         ).scalar_one_or_none()
         if not presence:
-            presence = Presence(id_employe=employe.id, datedujour=aujourdhui, statut="present")
+            presence = Presence(
+                id_employe=employe.id,
+                datedujour=aujourdhui,
+                statut="present",
+            )
             db.add(presence)
         db.add(entree)
         message = f"{employe.nom} est entré dans l'entreprise."
     else:
+        # ---------- SORTIE ----------
         action = "sortie"
-        sortie = Sortie(id_employe=employe.id, date=aujourdhui, heure_sortie=heure_actuelle)
+        sortie = Sortie(
+            id_employe=employe.id,
+            date=aujourdhui,
+            heure_sortie=heure_actuelle,
+        )
         carte.isentree = False
         db.add(sortie)
+
+        # Récupère la dernière entrée du jour sans sortie appariée (la plus récente)
+        derniere_entree = (
+            await db.execute(
+                select(PresenceEntree)
+                .where(
+                    PresenceEntree.id_employe == employe.id,
+                    PresenceEntree.date == aujourdhui,
+                )
+                .order_by(PresenceEntree.heure_entree.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+
+        if derniere_entree:
+            heure_entree_str = derniere_entree.heure_entree.strftime("%H:%M:%S")
+            entree_dt = datetime.combine(aujourdhui, derniere_entree.heure_entree)
+            sortie_dt = datetime.combine(aujourdhui, heure_actuelle)
+            duree_minutes = max(0, int((sortie_dt - entree_dt).total_seconds() // 60))
+
+            # Met à jour la durée cumulée du jour sur Presence
+            presence = (
+                await db.execute(
+                    select(Presence).where(
+                        Presence.id_employe == employe.id,
+                        Presence.datedujour == aujourdhui,
+                    )
+                )
+            ).scalar_one_or_none()
+            if presence:
+                presence.dureetravail = (presence.dureetravail or 0) + duree_minutes
+            else:
+                db.add(
+                    Presence(
+                        id_employe=employe.id,
+                        datedujour=aujourdhui,
+                        statut="present",
+                        dureetravail=duree_minutes,
+                    )
+                )
+
         message = f"{employe.nom} est sorti de l'entreprise."
 
     await db.commit()
 
-    await manager.broadcast({
+    payload_ws = {
         "event": f"{action}_entreprise",
         "message": message,
         "employe_id": employe.id,
         "nom": employe.nom,
         "via": "biometrie",
-    })
+        "heure": heure_str,
+        "action": action,
+    }
+    if heure_entree_str:
+        payload_ws["heure_entree"] = heure_entree_str
+    if duree_minutes is not None:
+        payload_ws["duree_minutes"] = duree_minutes
 
-    return {
+    await manager.broadcast(payload_ws)
+
+    response = {
         "result": "AUTHORIZED",
         "action": action,
         "employe_id": employe.id,
         "nom": employe.nom,
         "distance": round(dist, 4),
-        "heure": heure_actuelle.strftime("%H:%M:%S"),
+        "heure": heure_str,
+        "is_present": carte.isentree,  # True après entrée, False après sortie
     }
+    if heure_entree_str:
+        response["heure_entree"] = heure_entree_str
+    if duree_minutes is not None:
+        response["duree_minutes"] = duree_minutes
 
+    return response
 
 @router.delete("/{employe_id}", dependencies=[Depends(require_admin)])
 async def supprimer_visage(employe_id: int, db: AsyncSession = Depends(get_db)):
