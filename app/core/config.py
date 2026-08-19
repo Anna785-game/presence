@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     # --- Face server distant (ton PC, exposé via tunnel) ---
     FACE_SERVER_URL: str
     FACE_SHARED_SECRET: str
-
+    # --- Écran kiosque (secret statique, ne dépend pas d'un JWT qui expire) ---
+    ECRAN_SHARED_SECRET: str
 
 settings = Settings()

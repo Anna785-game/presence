@@ -1,12 +1,14 @@
+# app/routers/candidats.py
 import random
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from sqlalchemy import delete, select, update
+from app.core.config import settings
 from app.core.security import require_admin
 from app.db.database import get_db
 from app.db.models import Candidat, Employe, Poste
@@ -73,6 +75,43 @@ async def mon_statut(candidat_id: int, db: AsyncSession = Depends(get_db)):
     if not candidat:
         raise HTTPException(404, "Candidat non trouvé")
     return candidat
+
+
+# --- Écran kiosque (sys_ecran) : secret statique, pas un JWT admin ---
+
+def _verifier_secret_ecran(x_ecran_secret: str | None):
+    if x_ecran_secret != settings.ECRAN_SHARED_SECRET:
+        raise HTTPException(status_code=401, detail="Secret écran invalide")
+
+
+@router.get("/ecran/tache-active")
+async def tache_active_ecran(
+    db: AsyncSession = Depends(get_db),
+    x_ecran_secret: str | None = Header(default=None),
+):
+    """
+    Route dédiée à l'écran kiosque. Contrairement à /candidats (GET, admin),
+    pas de require_admin ici : un secret statique suffit, car l'écran doit
+    tourner en continu pendant toute l'expo sans qu'un JWT expire au bout
+    d'1h. Ne renvoie que le strict nécessaire (pas la liste complète).
+    """
+    _verifier_secret_ecran(x_ecran_secret)
+
+    stmt = select(Candidat).where(
+        Candidat.statut == "actif",
+        Candidat.employe_id.is_not(None),
+        Candidat.poste_attribue.is_(None),
+    )
+    candidat = (await db.execute(stmt)).scalars().first()
+
+    if not candidat:
+        return None
+
+    return {
+        "candidatId": candidat.id,
+        "employeId": candidat.employe_id,
+        "nom": candidat.nom,
+    }
 
 
 # --- Admin uniquement ---
