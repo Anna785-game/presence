@@ -173,7 +173,55 @@ async def enroll_visage_public(
     resultat["candidat_id"] = candidat.id
     return resultat
 
+@router.post("/demander-enrolement-ecran")
+@limiter.limit("1/5seconds")
+async def demander_enrolement_ecran(
+    request: Request,
+    candidat_id: int = Form(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Le téléphone du candidat signale que sa caméra est inutilisable
+    (permission refusée, matériel défaillant, etc.). L'écran kiosque
+    reçoit l'événement `enrolement_ecran_demande` et bascule en mode
+    enrôlement ciblé pour ce candidat uniquement.
+    """
+    candidat = await db.get(Candidat, candidat_id)
+    if not candidat:
+        raise HTTPException(404, "Candidat non trouvé")
+    if candidat.statut != "actif":
+        raise HTTPException(409, "Ce candidat n'est pas (ou plus) actif")
+    if not candidat.employe_id:
+        raise HTTPException(409, "Aucun employé associé à ce candidat")
 
+    employe = await db.get(Employe, candidat.employe_id)
+    if not employe:
+        raise HTTPException(404, "Employé introuvable pour ce candidat")
+    if employe.status != "Actif":
+        raise HTTPException(409, "Employé inactif")
+
+    # Déjà enrôlé ? pas la peine de relancer l'écran
+    existant = (
+        await db.execute(select(FaceEncoding).where(FaceEncoding.employe_id == employe.id))
+    ).scalar_one_or_none()
+    if existant:
+        raise HTTPException(409, "Le visage est déjà enregistré")
+
+    await manager.broadcast({
+        "event": "enrolement_ecran_demande",
+        "candidat": {"id": candidat.id, "nom": candidat.nom},
+        "employe_id": employe.id,
+        "message": f"{candidat.nom} demande à enrôler son visage sur l'écran.",
+    })
+
+    return {
+        "success": True,
+        "message": "L'écran kiosque a été notifié. Placez-vous devant lui.",
+        "employe_id": employe.id,
+        "candidat_id": candidat.id,
+        "nom": candidat.nom,
+    }
+    
 @router.post("/verify")
 async def verifier_visage(
     uidcarte: str = Form(...),

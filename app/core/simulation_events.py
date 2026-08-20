@@ -130,8 +130,8 @@ NETTOYEUR_VIRE: list[Event] = [
 # GÉNÉRAUX (compatibles avec n'importe quel poste)
 # ---------------------------------------------------------------------------
 GENERAL_ACTIF: list[Event] = [
-    {"description": "L'employé commence à bien s'intégrer dans l'équipe et le responsable remarque une bonne progression.", "type": "present", "statut_final": "actif"},
-    {"description": "Une petite erreur est commise pendant la journée, mais elle est immédiatement reconnue et corrigée.", "type": "present", "statut_final": "actif"},
+    # --- déjà présents (conservés) ---
+    {"description": "L'employé s'adapte rapidement à son nouvel environnement de travail et pose les bonnes questions.", "type": "present", "statut_final": "actif"},
     {"description": "L'employé aide spontanément un collègue qui rencontre une difficulté.", "type": "present", "statut_final": "actif"},
     {"description": "L'employé est absent pour cause de maladie et prévient son responsable avant le début de la journée.", "type": "absent", "statut_final": "actif"},
     {"description": "L'employé revient après son absence et reprend normalement son activité.", "type": "present", "statut_final": "actif"},
@@ -140,15 +140,46 @@ GENERAL_ACTIF: list[Event] = [
     {"description": "L'employé arrive en retard à cause d'un problème de transport mais prévient son responsable.", "type": "present", "statut_final": "actif"},
     {"description": "L'employé réalise une très bonne journée et reçoit des félicitations.", "type": "present", "statut_final": "actif"},
     {"description": "L'employé demande une journée d'absence pour une raison personnelle et prévient suffisamment tôt.", "type": "absent", "statut_final": "actif"},
+    # --- nouveaux (universels, tout métier) ---
+    {"description": "L'employé prend le temps de lire les consignes de sécurité et de les appliquer correctement dès le premier jour.", "type": "present", "statut_final": "actif"},
+    {"description": "Un collègue explique une procédure : l'employé écoute attentivement et la reproduit sans erreur.", "type": "present", "statut_final": "actif"},
+    {"description": "L'employé signale un petit dysfonctionnement avant qu'il ne devienne un vrai problème.", "type": "present", "statut_final": "actif"},
+    {"description": "La journée est calme : l'employé en profite pour ranger son espace de travail et anticiper le lendemain.", "type": "present", "statut_final": "actif"},
+    {"description": "L'employé accepte de rester un peu plus longtemps pour terminer une tâche urgente, sans se plaindre.", "type": "present", "statut_final": "actif"},
+    {"description": "Lors d'une réunion d'équipe, l'employé partage une observation utile qui améliore l'organisation du service.", "type": "present", "statut_final": "actif"},
+    {"description": "L'employé se trompe sur une consigne mineure, le reconnaît et corrige immédiatement.", "type": "present", "statut_final": "actif"},
+    {"description": "L'employé arrive à l'heure malgré un embouteillage inhabituel et commence sa journée sereinement.", "type": "present", "statut_final": "actif"},
+    {"description": "Un nouveau logiciel / outil est mis en place : l'employé se forme rapidement et aide les autres ensuite.", "type": "present", "statut_final": "actif"},
+    {"description": "L'employé gère correctement une situation imprévue sans paniquer ni bloquer le reste de l'équipe.", "type": "present", "statut_final": "actif"},
+    {"description": "L'employé respecte les pauses et revient exactement à l'heure prévue.", "type": "present", "statut_final": "actif"},
+    {"description": "Un client ou un collègue remercie l'employé pour sa disponibilité et sa politesse.", "type": "present", "statut_final": "actif"},
+    {"description": "L'employé prévient à l'avance d'un rendez-vous médical et s'absente une demi-journée uniquement.", "type": "absent", "statut_final": "actif"},
+    {"description": "L'employé propose une petite amélioration pratique (rangement, check-list, rappel) qui est adoptée par l'équipe.", "type": "present", "statut_final": "actif"},
+    {"description": "Après un jour difficile, l'employé revient le lendemain motivé et concentré.", "type": "present", "statut_final": "actif"},
+    {"description": "L'employé vérifie deux fois son travail avant de le valider et évite ainsi une erreur coûteuse.", "type": "present", "statut_final": "actif"},
+    {"description": "Une formation interne a lieu : l'employé y participe activement et pose des questions pertinentes.", "type": "present", "statut_final": "actif"},
+    {"description": "L'employé partage équitablement les tâches pénibles avec ses collègues sans se faire prier.", "type": "present", "statut_final": "actif"},
+    {"description": "L'employé est légèrement en retard mais rattrape le temps perdu en restant plus efficace le reste de la journée.", "type": "present", "statut_final": "actif"},
+    {"description": "L'employé note soigneusement les consignes reçues et n'a plus besoin de les redemander.", "type": "present", "statut_final": "actif"},
 ]
 
 GENERAL_VIRE: list[Event] = [
+    # --- déjà présents (conservés) ---
     {"description": "Plusieurs absences non justifiées et répétées désorganisent l'équipe. Le responsable décide de mettre fin à la période d'essai.", "type": "absent", "statut_final": "vire"},
     {"description": "Après plusieurs avertissements, l'employé continue de ne pas respecter les procédures internes.", "type": "present", "statut_final": "vire"},
     {"description": "Une erreur importante est répétée malgré plusieurs rappels du responsable.", "type": "present", "statut_final": "vire"},
     {"description": "Le comportement de l'employé crée des conflits répétés avec les autres membres de l'équipe.", "type": "present", "statut_final": "vire"},
     {"description": "L'employé ne se présente pas à plusieurs reprises sans justification et l'organisation du service devient impossible.", "type": "absent", "statut_final": "vire"},
     {"description": "Le responsable estime que le poste ne correspond finalement pas au profil de l'employé et met fin à la période d'essai.", "type": "present", "statut_final": "vire"},
+    # --- nouveaux (universels) ---
+    {"description": "L'employé refuse systématiquement d'appliquer les consignes de sécurité malgré les rappels.", "type": "present", "statut_final": "vire"},
+    {"description": "Des retards répétés et non justifiés perturbent le démarrage de chaque journée de travail.", "type": "present", "statut_final": "vire"},
+    {"description": "L'employé abandonne une tâche en cours sans prévenir personne, ce qui bloque le reste de l'équipe.", "type": "present", "statut_final": "vire"},
+    {"description": "Après plusieurs jours, le responsable constate que l'employé ne progresse pas et ne montre aucun engagement.", "type": "present", "statut_final": "vire"},
+    {"description": "L'employé ment sur une absence puis est confondu. La confiance est rompue.", "type": "absent", "statut_final": "vire"},
+    {"description": "Des plaintes récurrentes de collègues ou de clients concernant le comportement de l'employé obligent à arrêter la collaboration.", "type": "present", "statut_final": "vire"},
+    {"description": "L'employé utilise du matériel de façon dangereuse ou négligente malgré les formations reçues.", "type": "present", "statut_final": "vire"},
+    {"description": "Une absence le jour d'une échéance importante, sans aucun message, force le responsable à interrompre la période d'essai.", "type": "absent", "statut_final": "vire"},
 ]
 
 
