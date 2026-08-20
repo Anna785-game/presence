@@ -1,4 +1,3 @@
-
 """
 Événements de la simulation d'emploi.
 Chaque événement a :

@@ -134,3 +134,8 @@ class CandidatOut(BaseModel):
     # Rempli une fois le candidat accepté et promu en employé.
     # Reste renseigné même après passage en "historique".
     employe_id: int | None = None
+    # True une fois que le candidat a enrôlé son visage depuis son téléphone
+    # (voir /api/biometrie/enroll-public). Sert de signal au front visiteur
+    # pour savoir s'il doit encore aller enrôler son visage, ou s'il peut
+    # directement choisir son poste (/candidats/{id}/choisir-poste).
+    visage_enrole: bool = False

@@ -96,7 +96,7 @@ async def run_simulation(candidat_id: int):
     - Broadcast WebSocket à chaque jour
     - Crée de vraies lignes de présence / absence
     - Quand viré → détache la carte, passe l'employé en Inactif,
-      passe le candidat en historique
+      passe le candidat en historique, marque le jour simulé pour Historique
     """
     async with AsyncSessionLocal() as db:
         candidat = await db.get(Candidat, candidat_id)
@@ -149,11 +149,33 @@ async def run_simulation(candidat_id: int):
             # Fin de simulation si viré
             if event["statut_final"] == "vire":
                 employe.status = "Inactif"
-                employe.carterfid_id = None          # détache la carte
+                employe.carterfid_id = None
                 candidat.statut = "historique"
-                candidat.heure_retrait = datetime.now(timezone.utc)
+                # Jour *simulé* (pas now) → Historique affiche « Viré » sur la bonne date
+                candidat.heure_retrait = datetime.combine(
+                    jour, time(18, 0), tzinfo=timezone.utc
+                )
+                # Marque pour /historique/jour (priorité viré)
+                if event["type"] == "absent":
+                    abs_row = (
+                        await db.execute(
+                            select(Absence).where(
+                                Absence.idemploye == employe.id,
+                                Absence.dateabsence == jour,
+                            )
+                        )
+                    ).scalar_one_or_none()
+                    if abs_row:
+                        abs_row.raison = f"Viré — {event['description'][:230]}"
+                else:
+                    db.add(
+                        Absence(
+                            idemploye=employe.id,
+                            dateabsence=jour,
+                            raison=f"Viré — {event['description'][:230]}",
+                        )
+                    )
                 await nettoyer_biometrie_employe(db, employe.id)
-                
                 await db.commit()
 
                 await manager.broadcast({
@@ -171,10 +193,13 @@ async def run_simulation(candidat_id: int):
             await asyncio.sleep(3.5)
 
         # Sécurité (ne devrait jamais arriver car jour 7 force le viré)
+        jour_fin = base_date + timedelta(days=6)
         employe.status = "Inactif"
         employe.carterfid_id = None
         candidat.statut = "historique"
-        candidat.heure_retrait = datetime.now(timezone.utc)
+        candidat.heure_retrait = datetime.combine(
+            jour_fin, time(18, 0), tzinfo=timezone.utc
+        )
         await nettoyer_biometrie_employe(db, employe.id)
         await db.commit()
 

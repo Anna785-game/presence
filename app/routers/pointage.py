@@ -21,7 +21,7 @@ async def scan_and_assign(
 ):
     """
     Associe une carte RFID physique au candidat actuellement "actif",
-    à condition que son employé ait déjà un poste (roulette faite) et un
+    à condition que son employé ait déjà un poste (choisi par le candidat) et un
     visage enregistré. Aucune entrée n'est créée ici : l'employé devra
     présenter carte + visage à /api/biometrie/verify pour entrer.
     """
@@ -58,8 +58,9 @@ async def scan_and_assign(
     if employe.id_poste is None:
         raise HTTPException(
             409,
-            "Cet employé n'a pas encore de poste : termine d'abord l'enrôlement du visage "
-            "(/api/biometrie/enroll/{employe_id}), la roulette se déclenche à ce moment-là.",
+            "Cet employé n'a pas encore de poste : termine d'abord l'enrôlement du visage, "
+            "puis le choix du poste depuis le téléphone du candidat "
+            "(/candidats/{candidat_id}/choisir-poste).",
         )
 
     # 4. Assignation de la carte

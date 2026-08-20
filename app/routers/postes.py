@@ -34,7 +34,12 @@ async def delete_poste(poste_id: int, db: AsyncSession = Depends(get_db)):
 
 @router.post("/seed-demo", response_model=list[PosteOut], dependencies=[Depends(require_admin)])
 async def seed_postes_demo(db: AsyncSession = Depends(get_db)):
-    """Remplit la table avec les postes fun pour la roulette. À appeler une fois avant l'expo."""
+    """
+    Remplit la table avec quelques postes de démo, proposés ensuite au
+    choix du candidat depuis son téléphone (voir
+    app/routers/candidats.py::choisir_poste). À appeler une fois avant
+    l'expo, ou complète depuis le panneau "Postes" du back-office.
+    """
     postes_demo = [
         ("Nettoyeur de toilettes", 40),
         ("Boss", 30),

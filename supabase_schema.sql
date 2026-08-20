@@ -116,3 +116,5 @@ alter table employes alter column id_poste drop not null;
 alter table candidats add column if not exists user_id uuid references auth.users(id) on delete set null;
 alter table candidats add column if not exists employe_id bigint references employes(id) on delete set null;
 
+-- Migration à exécuter sur Supabase
+DROP INDEX IF EXISTS uniq_candidat_actif;

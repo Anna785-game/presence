@@ -43,8 +43,9 @@ class Employe(Base):
     user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
 
     # NULLABLE : un employé est désormais créé dès l'acceptation du candidat,
-    # AVANT la roulette. Le poste n'est attribué qu'à la fin de l'enrôlement
-    # du visage (voir app/routers/biometrie.py::enroll_visage).
+    # AVANT le choix du poste. Le poste n'est attribué qu'après l'enrôlement
+    # du visage, quand le candidat le choisit lui-même depuis son téléphone
+    # (voir app/routers/candidats.py::choisir_poste).
     id_poste: Mapped[int | None] = mapped_column(ForeignKey("postes.id"), nullable=True)
     poste: Mapped["Poste | None"] = relationship(back_populates="employes")
 

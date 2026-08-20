@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
-
+from app.routers.historique_jour import router as historique_jour_router
 from app.routers import (
     auth,
     candidats,
@@ -16,6 +16,7 @@ from app.routers import (
     simulation,   
     ws,
     presences_live_and_parcours,
+    demo,
 )
 
 app = FastAPI(title="Système de Sécurité et Pointage API", version="1.0.0")
@@ -42,7 +43,8 @@ app.include_router(simulation.router)
 app.include_router(ws.router)
 app.include_router(biometrie.router) 
 app.include_router(presences_live_and_parcours.router) 
-
+app.include_router(historique_jour_router)
+app.include_router(demo.router)
 
 @app.get("/health")
 async def health():

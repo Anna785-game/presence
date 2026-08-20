@@ -8,14 +8,26 @@ Identique à l'original, SAUF :
   - /enroll/{employe_id} n'utilise plus require_admin (JWT qui expire au
     bout d'1h) mais un secret statique X-Ecran-Secret, comme l'écran
     kiosque (voir app/routers/candidats.py::tache_active_ecran). Doit
-    correspondre à settings.ECRAN_SHARED_SECRET.
-Tout le reste (roulette, DB, websockets, logique carte+visage) est
-inchangé.
+    correspondre à settings.ECRAN_SHARED_SECRET. Conservé pour un usage
+    admin/dépannage, mais N'EST PLUS appelé par sys_ecran (voir plus bas).
+  - NOUVEAU : /enroll-public, appelé directement depuis le téléphone du
+    candidat (caméra frontale du téléphone). L'enrôlement biométrique ne
+    se fait donc plus sur l'écran kiosque. Comme /candidats/mon-statut,
+    la "credential" est simplement le candidat_id reçu à l'inscription
+    (aucun secret statique à embarquer dans une app publique) ; on
+    rate-limite la route pour limiter les abus.
+Tout le reste (DB, websockets, logique carte+visage) est inchangé.
+
+NOTE : l'attribution du poste n'est plus tirée au sort ici. L'enrôlement du
+visage se contente d'enregistrer l'encoding ; c'est le candidat qui choisit
+ensuite lui-même son poste depuis son téléphone, voir
+app/routers/candidats.py::choisir_poste.
 """
-import random
 from datetime import date, datetime, timedelta
 
-from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -37,18 +49,72 @@ from app.db.models import (
     Carterfid,
     Employe,
     FaceEncoding,
-    Poste,
     Presence,
     PresenceEntree,
     Sortie,
 )
 
 router = APIRouter(prefix="/api/biometrie", tags=["biometrie"])
+limiter = Limiter(key_func=get_remote_address)
 
 
 def _verifier_secret_ecran(x_ecran_secret: str | None):
     if x_ecran_secret != settings.ECRAN_SHARED_SECRET:
         raise HTTPException(status_code=401, detail="Secret écran invalide")
+
+
+async def _enrolir_employe(employe: Employe, contenu_photo: bytes, db: AsyncSession) -> dict:
+    """
+    Logique métier partagée par /enroll/{employe_id} (dépannage admin/écran)
+    et /enroll-public (téléphone du candidat) : encode le visage et le
+    stocke. N'attribue plus aucun poste (voir app/routers/candidats.py::
+    choisir_poste pour l'étape suivante, choisie par le candidat lui-même).
+    Ne fait AUCUNE vérification d'autorisation : c'est aux endpoints
+    appelants de s'en charger avant d'appeler cette fonction.
+    """
+    if employe.status != "Actif":
+        raise HTTPException(409, "Impossible d'enregistrer un visage pour un employé inactif")
+
+    try:
+        encoding = await image_bytes_vers_encoding(contenu_photo)
+    except AucunVisageDetecte:
+        raise HTTPException(422, "Aucun visage détecté : replace-toi dans le cadre")
+    except PlusieursVisagesDetectes:
+        raise HTTPException(422, "Plusieurs visages détectés : une seule personne à la fois dans le cadre")
+    except FaceServerIndisponible:
+        raise HTTPException(503, "Service de reconnaissance faciale indisponible (PC hors ligne ?)")
+
+    existant = (
+        await db.execute(select(FaceEncoding).where(FaceEncoding.employe_id == employe.id))
+    ).scalar_one_or_none()
+
+    if existant:
+        existant.encoding = encoding
+    else:
+        db.add(FaceEncoding(employe_id=employe.id, encoding=encoding))
+
+    await db.commit()
+    await db.refresh(employe)
+
+    candidat = (
+        await db.execute(select(Candidat).where(Candidat.employe_id == employe.id))
+    ).scalar_one_or_none()
+
+    await manager.broadcast({
+        "event": "visage_enrole",
+        "employe_id": employe.id,
+        "candidat": {"id": candidat.id, "nom": candidat.nom} if candidat else None,
+        "message": (
+            f"{candidat.nom if candidat else 'Le candidat'} a enrôlé son visage. "
+            f"Il ne lui reste plus qu'à choisir son poste."
+        ),
+    })
+
+    return {
+        "success": True,
+        "message": "Visage enregistré avec succès",
+        "employe_id": employe.id,
+    }
 
 
 @router.post("/enroll/{employe_id}")
@@ -58,82 +124,54 @@ async def enroll_visage(
     db: AsyncSession = Depends(get_db),
     x_ecran_secret: str | None = Header(default=None),
 ):
+    """
+    Conservé comme filet de secours (dépannage régie / admin), mais n'est
+    plus utilisé par le parcours normal : l'enrôlement se fait désormais
+    depuis le téléphone du candidat via /enroll-public.
+    """
     _verifier_secret_ecran(x_ecran_secret)
 
     employe = await db.get(Employe, employe_id)
     if not employe:
         raise HTTPException(404, "Employé non trouvé")
-    if employe.status != "Actif":
-        raise HTTPException(409, "Impossible d'enregistrer un visage pour un employé inactif")
 
     contenu = await photo.read()
-    try:
-        encoding = await image_bytes_vers_encoding(contenu)
-    except AucunVisageDetecte:
-        raise HTTPException(422, "Aucun visage détecté : replace-toi dans le cadre")
-    except PlusieursVisagesDetectes:
-        raise HTTPException(422, "Plusieurs visages détectés : une seule personne à la fois dans le cadre")
-    except FaceServerIndisponible:
-        raise HTTPException(503, "Service de reconnaissance faciale indisponible (PC hors ligne ?)")
+    return await _enrolir_employe(employe, contenu, db)
 
-    existant = (
-        await db.execute(select(FaceEncoding).where(FaceEncoding.employe_id == employe_id))
-    ).scalar_one_or_none()
 
-    if existant:
-        existant.encoding = encoding
-    else:
-        db.add(FaceEncoding(employe_id=employe_id, encoding=encoding))
+@router.post("/enroll-public")
+@limiter.limit("1/3seconds")
+async def enroll_visage_public(
+    request: Request,
+    candidat_id: int = Form(...),
+    photo: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Enrôlement biométrique depuis le téléphone du candidat (caméra
+    frontale), déclenché par le bouton "Enrôler votre visage" dans
+    systeme_presence_user. Comme /candidats/mon-statut, l'identifiant du
+    candidat (reçu à l'inscription, stocké côté client) suffit : c'est
+    cohérent avec le niveau de sécurité du reste de l'app publique, et ça
+    évite d'embarquer un secret statique dans un front accessible à tous
+    les visiteurs (contrairement à l'écran kiosque, physiquement contrôlé).
+    """
+    candidat = await db.get(Candidat, candidat_id)
+    if not candidat:
+        raise HTTPException(404, "Candidat non trouvé")
+    if candidat.statut != "actif":
+        raise HTTPException(409, "Ce candidat n'est pas (ou plus) actif")
+    if not candidat.employe_id:
+        raise HTTPException(409, "Aucun employé associé à ce candidat")
 
-    poste_gagnant = None
-    candidat = None
-    if employe.id_poste is None:
-        postes = (await db.execute(select(Poste))).scalars().all()
-        if not postes:
-            raise HTTPException(400, "Aucun poste configuré (lance /postes/seed-demo)")
+    employe = await db.get(Employe, candidat.employe_id)
+    if not employe:
+        raise HTTPException(404, "Employé introuvable pour ce candidat")
 
-        poids = [p.poids or 1 for p in postes]
-        total_poids = sum(poids)
-        poste_gagnant = random.choices(postes, weights=poids, k=1)[0]
-        employe.id_poste = poste_gagnant.id
-
-        candidat = (
-            await db.execute(select(Candidat).where(Candidat.employe_id == employe_id))
-        ).scalar_one_or_none()
-        if candidat:
-            candidat.poste_attribue = poste_gagnant.type_poste
-
-    await db.commit()
-    await db.refresh(employe)
-
-    if poste_gagnant:
-        repartition = [
-            {
-                "poste": p.type_poste,
-                "pourcentage": round((p.poids or 1) / total_poids * 100, 1),
-            }
-            for p in postes
-        ]
-        await manager.broadcast({
-            "event": "roulette",
-            "employe_id": employe.id,
-            "poste_gagnant": poste_gagnant.type_poste,
-            "repartition": repartition,
-            "candidat": {"id": candidat.id, "nom": candidat.nom} if candidat else None,
-        })
-        await manager.broadcast({
-            "event": "employe_actif",
-            "employe_id": employe.id,
-            "poste": poste_gagnant.type_poste,
-            "message": f"Félicitations ! Vous êtes maintenant employé en tant que {poste_gagnant.type_poste}.",
-        })
-
-    return {
-        "success": True,
-        "message": "Visage enregistré avec succès",
-        "employe_id": employe_id,
-        "poste_attribue": poste_gagnant.type_poste if poste_gagnant else None,
-    }
+    contenu = await photo.read()
+    resultat = await _enrolir_employe(employe, contenu, db)
+    resultat["candidat_id"] = candidat.id
+    return resultat
 
 
 @router.post("/verify")
