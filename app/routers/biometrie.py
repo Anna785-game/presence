@@ -16,6 +16,21 @@ Identique à l'original, SAUF :
     la "credential" est simplement le candidat_id reçu à l'inscription
     (aucun secret statique à embarquer dans une app publique) ; on
     rate-limite la route pour limiter les abus.
+  - NOUVEAU (2 capteurs physiques) : /verify a été scindé en
+    /verify-entree et /verify-sortie. Chaque capteur (carte + caméra)
+    appelle SON endpoint dédié. Chaque endpoint vérifie l'état actuel de
+    la carte (carte.isentree) et REFUSE (409) si l'état ne correspond
+    pas au sens attendu, au lieu de basculer aveuglément comme avant.
+    Ça évite qu'une carte déjà "dedans" soit re-comptée comme une entrée
+    (ou l'inverse) si quelqu'un se trompe de capteur ou rebadge deux fois
+    sur le même. L'ancien /verify est conservé tel quel pour compat
+    descendante (dépannage / test à un seul capteur), mais n'est plus le
+    chemin utilisé par les 2 capteurs physiques.
+  - NOUVEAU (fuseau horaire) : date.today() et datetime.now() ont été
+    remplacés par app.core.time_utils.aujourdhui()/maintenant(), pour
+    utiliser l'heure de Madagascar (UTC+3) au lieu de l'heure du serveur
+    (UTC). Sinon toute entrée/sortie entre ~21h et minuit était enregistrée
+    avec la mauvaise date (celle du serveur, en retard de 3h).
 Tout le reste (DB, websockets, logique carte+visage) est inchangé.
 
 NOTE : l'attribution du poste n'est plus tirée au sort ici. L'enrôlement du
@@ -32,6 +47,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.time_utils import aujourdhui as _aujourdhui, maintenant as _maintenant
 from app.core.face_client import (
     SEUIL_DEFAUT,
     AucunVisageDetecte,
@@ -221,14 +237,23 @@ async def demander_enrolement_ecran(
         "candidat_id": candidat.id,
         "nom": candidat.nom,
     }
-    
-@router.post("/verify")
-async def verifier_visage(
-    uidcarte: str = Form(...),
-    photo: UploadFile = File(...),
-    seuil: float = Form(SEUIL_DEFAUT),
-    db: AsyncSession = Depends(get_db),
+
+
+async def _verifier_carte_et_visage(
+    uidcarte: str,
+    photo: UploadFile,
+    seuil: float,
+    db: AsyncSession,
 ):
+    """
+    Étapes communes aux 2 capteurs (entrée / sortie) : retrouver la carte,
+    l'employé, vérifier le statut, et comparer le visage. Ne touche PAS à
+    carte.isentree ni à la création des lignes PresenceEntree/Sortie :
+    ça reste spécifique à chaque sens, géré par l'appelant.
+
+    Retourne soit un dict {"result": "DENIED", ...} à renvoyer tel quel,
+    soit un tuple (carte, employe, dist) si tout est bon.
+    """
     carte = (
         await db.execute(select(Carterfid).where(Carterfid.uidcarte == uidcarte))
     ).scalar_one_or_none()
@@ -283,15 +308,231 @@ async def verifier_visage(
             "distance": round(dist, 4),
         }
 
-    aujourdhui = date.today()
-    heure_actuelle = datetime.now().time()
+    return carte, employe, dist
+
+
+@router.post("/verify-entree")
+async def verifier_visage_entree(
+    uidcarte: str = Form(...),
+    photo: UploadFile = File(...),
+    seuil: float = Form(SEUIL_DEFAUT),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Capteur physique d'ENTRÉE (carte + caméra). Carte + visage vérifiés
+    comme avant, MAIS : si la carte est déjà marquée comme "dedans"
+    (carte.isentree == True), on REFUSE (409) au lieu de basculer en
+    sortie. La personne s'est trompée de capteur, ou rebadge deux fois
+    de suite : dans les deux cas ce n'est pas une entrée valide.
+    """
+    resultat = await _verifier_carte_et_visage(uidcarte, photo, seuil, db)
+    if isinstance(resultat, dict):
+        return resultat
+    carte, employe, dist = resultat
+
+    if carte.isentree:
+        return {
+            "result": "DENIED",
+            "reason": "deja_entre",
+            "employe_id": employe.id,
+            "message": f"{employe.nom} est déjà marqué comme entré. Utilisez le capteur de sortie.",
+        }
+
+    aujourdhui = _aujourdhui()
+    heure_actuelle = _maintenant().time()
+    heure_str = heure_actuelle.strftime("%H:%M:%S")
+
+    entree = PresenceEntree(
+        id_employe=employe.id,
+        date=aujourdhui,
+        heure_entree=heure_actuelle,
+        ack=True,
+    )
+    carte.isentree = True
+
+    presence = (
+        await db.execute(
+            select(Presence).where(
+                Presence.id_employe == employe.id,
+                Presence.datedujour == aujourdhui,
+            )
+        )
+    ).scalar_one_or_none()
+    if not presence:
+        presence = Presence(
+            id_employe=employe.id,
+            datedujour=aujourdhui,
+            statut="present",
+        )
+        db.add(presence)
+    db.add(entree)
+
+    await db.commit()
+
+    message = f"{employe.nom} est entré dans l'entreprise."
+    await manager.broadcast({
+        "event": "entree_entreprise",
+        "message": message,
+        "employe_id": employe.id,
+        "nom": employe.nom,
+        "via": "biometrie",
+        "heure": heure_str,
+        "action": "entree",
+    })
+
+    return {
+        "result": "AUTHORIZED",
+        "action": "entree",
+        "employe_id": employe.id,
+        "nom": employe.nom,
+        "distance": round(dist, 4),
+        "heure": heure_str,
+        "is_present": True,
+    }
+
+
+@router.post("/verify-sortie")
+async def verifier_visage_sortie(
+    uidcarte: str = Form(...),
+    photo: UploadFile = File(...),
+    seuil: float = Form(SEUIL_DEFAUT),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Capteur physique de SORTIE (carte + caméra). Symétrique à
+    /verify-entree : si la carte n'est PAS marquée comme "dedans"
+    (carte.isentree == False), on REFUSE (409) au lieu d'enregistrer
+    une sortie fantôme.
+    """
+    resultat = await _verifier_carte_et_visage(uidcarte, photo, seuil, db)
+    if isinstance(resultat, dict):
+        return resultat
+    carte, employe, dist = resultat
+
+    if not carte.isentree:
+        return {
+            "result": "DENIED",
+            "reason": "pas_encore_entre",
+            "employe_id": employe.id,
+            "message": f"{employe.nom} n'est pas marqué comme entré. Utilisez le capteur d'entrée.",
+        }
+
+    aujourdhui = _aujourdhui()
+    heure_actuelle = _maintenant().time()
+    heure_str = heure_actuelle.strftime("%H:%M:%S")
+
+    heure_entree_str = None
+    duree_minutes = None
+
+    sortie = Sortie(
+        id_employe=employe.id,
+        date=aujourdhui,
+        heure_sortie=heure_actuelle,
+    )
+    carte.isentree = False
+    db.add(sortie)
+
+    # Récupère la dernière entrée du jour sans sortie appariée (la plus récente)
+    derniere_entree = (
+        await db.execute(
+            select(PresenceEntree)
+            .where(
+                PresenceEntree.id_employe == employe.id,
+                PresenceEntree.date == aujourdhui,
+            )
+            .order_by(PresenceEntree.heure_entree.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+    if derniere_entree:
+        heure_entree_str = derniere_entree.heure_entree.strftime("%H:%M:%S")
+        entree_dt = datetime.combine(aujourdhui, derniere_entree.heure_entree)
+        sortie_dt = datetime.combine(aujourdhui, heure_actuelle)
+        duree_minutes = max(0, int((sortie_dt - entree_dt).total_seconds() // 60))
+
+        presence = (
+            await db.execute(
+                select(Presence).where(
+                    Presence.id_employe == employe.id,
+                    Presence.datedujour == aujourdhui,
+                )
+            )
+        ).scalar_one_or_none()
+        if presence:
+            presence.dureetravail = (presence.dureetravail or 0) + duree_minutes
+        else:
+            db.add(
+                Presence(
+                    id_employe=employe.id,
+                    datedujour=aujourdhui,
+                    statut="present",
+                    dureetravail=duree_minutes,
+                )
+            )
+
+    await db.commit()
+
+    message = f"{employe.nom} est sorti de l'entreprise."
+    payload_ws = {
+        "event": "sortie_entreprise",
+        "message": message,
+        "employe_id": employe.id,
+        "nom": employe.nom,
+        "via": "biometrie",
+        "heure": heure_str,
+        "action": "sortie",
+    }
+    if heure_entree_str:
+        payload_ws["heure_entree"] = heure_entree_str
+    if duree_minutes is not None:
+        payload_ws["duree_minutes"] = duree_minutes
+    await manager.broadcast(payload_ws)
+
+    response = {
+        "result": "AUTHORIZED",
+        "action": "sortie",
+        "employe_id": employe.id,
+        "nom": employe.nom,
+        "distance": round(dist, 4),
+        "heure": heure_str,
+        "is_present": False,
+    }
+    if heure_entree_str:
+        response["heure_entree"] = heure_entree_str
+    if duree_minutes is not None:
+        response["duree_minutes"] = duree_minutes
+
+    return response
+
+
+@router.post("/verify")
+async def verifier_visage(
+    uidcarte: str = Form(...),
+    photo: UploadFile = File(...),
+    seuil: float = Form(SEUIL_DEFAUT),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    ANCIEN endpoint à bascule automatique (un seul capteur physique).
+    Conservé pour compat descendante / dépannage, mais les 2 capteurs
+    physiques (entrée + sortie) doivent utiliser /verify-entree et
+    /verify-sortie ci-dessus, qui rejettent l'état incohérent au lieu
+    de basculer aveuglément.
+    """
+    resultat = await _verifier_carte_et_visage(uidcarte, photo, seuil, db)
+    if isinstance(resultat, dict):
+        return resultat
+    carte, employe, dist = resultat
+
+    aujourdhui = _aujourdhui()
+    heure_actuelle = _maintenant().time()
     heure_str = heure_actuelle.strftime("%H:%M:%S")
 
     heure_entree_str = None
     duree_minutes = None
 
     if not carte.isentree:
-        # ---------- ENTRÉE ----------
         action = "entree"
         entree = PresenceEntree(
             id_employe=employe.id,
@@ -319,7 +560,6 @@ async def verifier_visage(
         db.add(entree)
         message = f"{employe.nom} est entré dans l'entreprise."
     else:
-        # ---------- SORTIE ----------
         action = "sortie"
         sortie = Sortie(
             id_employe=employe.id,
@@ -329,7 +569,6 @@ async def verifier_visage(
         carte.isentree = False
         db.add(sortie)
 
-        # Récupère la dernière entrée du jour sans sortie appariée (la plus récente)
         derniere_entree = (
             await db.execute(
                 select(PresenceEntree)
@@ -348,7 +587,6 @@ async def verifier_visage(
             sortie_dt = datetime.combine(aujourdhui, heure_actuelle)
             duree_minutes = max(0, int((sortie_dt - entree_dt).total_seconds() // 60))
 
-            # Met à jour la durée cumulée du jour sur Presence
             presence = (
                 await db.execute(
                     select(Presence).where(
@@ -396,7 +634,7 @@ async def verifier_visage(
         "nom": employe.nom,
         "distance": round(dist, 4),
         "heure": heure_str,
-        "is_present": carte.isentree,  # True après entrée, False après sortie
+        "is_present": carte.isentree,
     }
     if heure_entree_str:
         response["heure_entree"] = heure_entree_str
@@ -404,6 +642,7 @@ async def verifier_visage(
         response["duree_minutes"] = duree_minutes
 
     return response
+
 
 @router.delete("/{employe_id}", dependencies=[Depends(require_admin)])
 async def supprimer_visage(employe_id: int, db: AsyncSession = Depends(get_db)):

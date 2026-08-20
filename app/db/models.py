@@ -38,7 +38,7 @@ class Employe(Base):
     matricule: Mapped[str] = mapped_column(String(15), unique=True, index=True)
     date_embauche: Mapped[date | None] = mapped_column(Date)
     status: Mapped[str | None] = mapped_column(String(13), default="Actif")  # Actif / Inactif
-
+    is_simulation: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     # Lien vers l'utilisateur Supabase Auth (nullable : un employé n'a pas forcément de compte)
     user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
 

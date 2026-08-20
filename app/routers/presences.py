@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import get_current_user, require_admin
+from app.core.time_utils import aujourdhui as _aujourdhui, maintenant as _maintenant
 from app.db.database import get_db
 from app.db.models import Absence, Employe, Presence, PresenceEntree, Sortie
 from app.schemas.schemas import AbsenceCreate, AbsenceOut, PresenceOut
@@ -53,7 +54,7 @@ async def create_absence(payload: AbsenceCreate, db: AsyncSession = Depends(get_
 
 @router.post("/jobs/calcul-duree-travail")
 async def calcul_duree_travail(db: AsyncSession = Depends(get_db), _=Depends(require_admin)):
-    today = datetime.now().date()
+    today = _aujourdhui()
     employes = (
         await db.execute(select(Employe).where(Employe.status == "Actif"))
     ).scalars().all()
@@ -106,7 +107,7 @@ async def calcul_duree_travail(db: AsyncSession = Depends(get_db), _=Depends(req
 
 @router.post("/jobs/insert-absences")
 async def insert_absences(db: AsyncSession = Depends(get_db), _=Depends(require_admin)):
-    today = datetime.now().date()
+    today = _aujourdhui()
     employes = (
         await db.execute(select(Employe).where(Employe.status == "Actif"))
     ).scalars().all()

@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import require_admin
+from app.core.time_utils import aujourdhui as _aujourdhui, maintenant as _maintenant
 from app.core.ws_manager import manager
 from app.db.database import get_db
 from app.db.models import Carterfid, Candidat, Employe, Presence, PresenceEntree, Sortie
@@ -115,8 +116,8 @@ async def gestion_presence(payload: BadgeScan, db: AsyncSession = Depends(get_db
     if employe.status != "Actif":
         raise HTTPException(403, "Cet employé n'est plus actif")
 
-    aujourdhui = date.today()
-    heure_actuelle = datetime.now().time()
+    aujourdhui = _aujourdhui()
+    heure_actuelle = _maintenant().time()
 
     if not carte.isentree:
         # Entrée

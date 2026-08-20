@@ -19,6 +19,7 @@ from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import get_current_user, require_admin
+from app.core.time_utils import aujourdhui as _aujourdhui, maintenant as _maintenant
 from app.core.ws_manager import manager
 from app.db.database import get_db
 from app.db.models import (
@@ -79,8 +80,8 @@ async def liste_presents_live(db: AsyncSession = Depends(get_db)):
     Employés actuellement présents = carte.isentree == True et status Actif.
     On joint la dernière entrée du jour pour afficher l'heure d'entrée.
     """
-    aujourdhui = date.today()
-    maintenant = datetime.now()
+    aujourdhui = _aujourdhui()
+    maintenant_dt = _maintenant()
 
     # Cartes marquées "entrées"
     cartes = (
@@ -119,7 +120,7 @@ async def liste_presents_live(db: AsyncSession = Depends(get_db)):
             continue
 
         entree_dt = datetime.combine(aujourdhui, derniere_entree.heure_entree)
-        minutes = max(0, int((maintenant - entree_dt).total_seconds() // 60))
+        minutes = max(0, int((maintenant_dt - entree_dt).total_seconds() // 60))
 
         result.append(
             PresentLiveOut(
@@ -156,8 +157,8 @@ async def force_sortie(employe_id: int, db: AsyncSession = Depends(get_db)):
     if not carte or not carte.isentree:
         raise HTTPException(409, "Cet employé n'est pas marqué présent")
 
-    aujourdhui = date.today()
-    heure_actuelle = datetime.now().time()
+    aujourdhui = _aujourdhui()
+    heure_actuelle = _maintenant().time()
 
     sortie = Sortie(
         id_employe=employe.id,

@@ -7,6 +7,7 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 from sqlalchemy import delete, select, update
 from app.core.config import settings
+from app.core.time_utils import aujourdhui as _aujourdhui, maintenant as _maintenant
 from app.core.security import require_admin
 from app.db.database import get_db
 from app.db.models import Candidat, Carterfid, Employe, FaceEncoding, Poste
@@ -391,7 +392,7 @@ async def accepter(candidat_id: int, db: AsyncSession = Depends(get_db)):
         carterfid_id=None,
         status="Actif",
         user_id=candidat.user_id,
-        date_embauche=date.today(),
+        date_embauche=_aujourdhui(),
     )
     db.add(employe)
     await db.flush()

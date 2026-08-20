@@ -118,3 +118,11 @@ alter table candidats add column if not exists employe_id bigint references empl
 
 -- Migration à exécuter sur Supabase
 DROP INDEX IF EXISTS uniq_candidat_actif;
+
+alter table employes
+  add column if not exists is_simulation boolean not null default false;
+
+update employes
+set is_simulation = true
+where status = 'Inactif'
+  and matricule like 'CAND-%';

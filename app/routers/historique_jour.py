@@ -1,11 +1,16 @@
 """
-GET /historique/jour?date=YYYY-MM-DD
+GET /historique/jour?date=YYYY-MM-DD&source=normal|simulation|all
 
 Agrège, pour une journée donnée, tous les employés ayant un événement :
   - présence (entrée / sortie / durée)
   - absence
   - licenciement (candidat.heure_retrait le même jour civil, ou statut Inactif
     + absence raison "Viré" créée par POST /employes/{id}/virer)
+
+source :
+  - normal     → exclut les employés is_simulation=True
+  - simulation → uniquement les employés is_simulation=True
+  - all        → tout le monde
 
 Un employé n'apparaît que s'il a au moins un de ces événements ce jour-là.
 S'il est viré le 21, il n'apparaît plus le 22 (sauf s'il a encore une
@@ -20,10 +25,11 @@ from datetime import date, datetime, time, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import select, and_, or_, func
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import get_current_user, require_admin
+from app.core.time_utils import aujourdhui as _aujourdhui, maintenant as _maintenant
 from app.core.ws_manager import manager
 from app.core.biometrie_hooks import nettoyer_biometrie_employe
 from app.db.database import get_db
@@ -77,6 +83,7 @@ class HistoriqueJourOut(BaseModel):
 @router.get("/historique/jour", response_model=HistoriqueJourOut)
 async def historique_jour(
     date_jour: date = Query(..., alias="date", description="YYYY-MM-DD"),
+    source: str = Query("normal", pattern="^(normal|simulation|all)$"),
     db: AsyncSession = Depends(get_db),
 ):
     # --- Présences du jour -------------------------------------------------
@@ -101,6 +108,7 @@ async def historique_jour(
     entrees_by_emp: dict[int, list] = {}
     for e in entrees:
         entrees_by_emp.setdefault(e.id_employe, []).append(e)
+
     sorties_by_emp: dict[int, list] = {}
     for s in sorties:
         sorties_by_emp.setdefault(s.id_employe, []).append(s)
@@ -132,7 +140,13 @@ async def historique_jour(
         if a.raison and a.raison.lower().startswith("viré"):
             vire_by_emp.setdefault(a.idemploye, None)
 
-    emp_ids = set(presence_by_emp) | set(entrees_by_emp) | set(sorties_by_emp) | set(absence_by_emp) | set(vire_by_emp)
+    emp_ids = (
+        set(presence_by_emp)
+        | set(entrees_by_emp)
+        | set(sorties_by_emp)
+        | set(absence_by_emp)
+        | set(vire_by_emp)
+    )
     if not emp_ids:
         return HistoriqueJourOut(date=date_jour.isoformat(), employes=[])
 
@@ -140,11 +154,13 @@ async def historique_jour(
         await db.execute(select(Employe).where(Employe.id.in_(emp_ids)))
     ).scalars().all()
     emp_map = {e.id: e for e in employes}
+    emp_flags = {e.id: bool(getattr(e, "is_simulation", False)) for e in employes}
 
     postes = (await db.execute(select(Poste))).scalars().all()
     poste_map = {p.id: p.type_poste for p in postes}
 
     result: list[EmployeJourOut] = []
+
     for eid in emp_ids:
         emp = emp_map.get(eid)
         if not emp:
@@ -189,7 +205,6 @@ async def historique_jour(
                 )
             for s in sorts:
                 duree_s = None
-                # durée depuis dernière entrée du même jour avant cette sortie
                 candidats_e = [e for e in ents if e.heure_entree <= s.heure_sortie]
                 if candidats_e:
                     best = max(candidats_e, key=lambda x: x.heure_entree)
@@ -202,14 +217,21 @@ async def historique_jour(
                         heure=s.heure_sortie.strftime("%H:%M:%S"),
                         duree_minutes=duree_s,
                         label=f"Sortie à {s.heure_sortie.strftime('%H:%M')}"
-                        + (f" ({duree_s // 60}h{duree_s % 60:02d})" if duree_s is not None else ""),
+                        + (
+                            f" ({duree_s // 60}h{duree_s % 60:02d})"
+                            if duree_s is not None
+                            else ""
+                        ),
                     )
                 )
-            heure_entree = ents[0].heure_entree.strftime("%H:%M:%S") if ents else None
-            heure_sortie = sorts[-1].heure_sortie.strftime("%H:%M:%S") if sorts else None
+            heure_entree = (
+                ents[0].heure_entree.strftime("%H:%M:%S") if ents else None
+            )
+            heure_sortie = (
+                sorts[-1].heure_sortie.strftime("%H:%M:%S") if sorts else None
+            )
             duree = pres.dureetravail if pres else None
             if duree is None and heure_entree and heure_sortie:
-                # estimation simple
                 try:
                     h_e = datetime.strptime(heure_entree, "%H:%M:%S").time()
                     h_s = datetime.strptime(heure_sortie, "%H:%M:%S").time()
@@ -242,6 +264,13 @@ async def historique_jour(
             )
         )
 
+    # Filtre Normal vs Simulation
+    if source == "normal":
+        result = [e for e in result if not emp_flags.get(e.employe_id, False)]
+    elif source == "simulation":
+        result = [e for e in result if emp_flags.get(e.employe_id, False)]
+    # source == "all" → on garde tout
+
     # Tri : présents d'abord, puis absents, puis virés ; alpha dans chaque groupe
     order = {"present": 0, "absent": 1, "vire": 2}
     result.sort(key=lambda x: (order.get(x.statut_jour, 9), (x.nom or "").lower()))
@@ -266,7 +295,7 @@ async def virer_employe(employe_id: int, db: AsyncSession = Depends(get_db)):
     if employe.status == "Inactif":
         raise HTTPException(409, "Cet employé est déjà inactif")
 
-    aujourdhui = date.today()
+    aujourdhui = _aujourdhui()
 
     employe.status = "Inactif"
     employe.carterfid_id = None

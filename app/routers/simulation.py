@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import require_admin
+from app.core.time_utils import aujourdhui as _aujourdhui, maintenant as _maintenant
 from app.core.ws_manager import manager
 from app.core.biometrie_hooks import nettoyer_biometrie_employe
 from app.db.database import AsyncSessionLocal, get_db
@@ -106,9 +107,12 @@ async def run_simulation(candidat_id: int):
         employe = await db.get(Employe, candidat.employe_id)
         if not employe:
             return
-
+        
+        employe.is_simulation = True
+        await db.commit()
+        
         poste = candidat.poste_attribue or "Vendeur"
-        base_date = date.today()
+        base_date = _aujourdhui()
 
         # Signal de démarrage
         await manager.broadcast({
