@@ -12,6 +12,7 @@ Schemas Pydantic à ajouter dans app/schemas/schemas.py (voir en bas).
 """
 
 from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -32,6 +33,9 @@ from app.db.models import (
 )
 
 router = APIRouter(tags=["presences"], dependencies=[Depends(get_current_user)])
+
+# Même fuseau que time_utils (Indian/Antananarivo = UTC+3)
+FUSEAU_LOCAL = ZoneInfo("Indian/Antananarivo")
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +123,13 @@ async def liste_presents_live(db: AsyncSession = Depends(get_db)):
             # Incohérence (isentree=True mais pas d'entrée du jour) → on ignore
             continue
 
-        entree_dt = datetime.combine(aujourdhui, derniere_entree.heure_entree)
+        # FIX : rendre entree_dt timezone-aware (même fuseau que maintenant_dt)
+        # pour éviter TypeError: can't subtract offset-naive and offset-aware datetimes
+        entree_dt = datetime.combine(
+            aujourdhui,
+            derniere_entree.heure_entree,
+            tzinfo=FUSEAU_LOCAL,
+        )
         minutes = max(0, int((maintenant_dt - entree_dt).total_seconds() // 60))
 
         result.append(
