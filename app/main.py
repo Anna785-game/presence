@@ -11,6 +11,7 @@ from app.routers import (
     cartes,
     employes,
     pointage,
+    porte,
     postes,
     presences,
     simulation,   
@@ -37,6 +38,7 @@ app.include_router(postes.router)
 app.include_router(cartes.router)
 app.include_router(presences.router)
 app.include_router(pointage.router)
+app.include_router(porte.router)
 app.include_router(auth.router)
 app.include_router(candidats.router)
 app.include_router(simulation.router)  
