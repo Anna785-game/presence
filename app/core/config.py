@@ -17,5 +17,6 @@ class Settings(BaseSettings):
     FACE_SHARED_SECRET: str
     # --- Écran kiosque (secret statique, ne dépend pas d'un JWT qui expire) ---
     ECRAN_SHARED_SECRET: str
+    PORTE_SHARED_SECRET: str
 
 settings = Settings()
