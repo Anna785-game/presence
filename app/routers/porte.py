@@ -1,4 +1,3 @@
-# app/routers/porte.py
 """
 Endpoint dédié aux boîtiers physiques ESP32 (2 lecteurs RFID + servos +
 LCD + LEDs), PAS au kiosque sys_ecran.
@@ -24,6 +23,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.porte_pending import (
+    clear_old,
+    clear_pending,
+    consume_if_authorized,
+    create_pending,
+    get_pending,
+)
 from app.core.ws_manager import manager
 from app.db.database import get_db
 from app.db.models import Carterfid, Employe
@@ -147,9 +153,69 @@ async def verifier_carte(
         }
     )
 
+    # Demande d'ouverture en attente de validation faciale (polling ESP32)
+    create_pending(
+        uid=carte.uidcarte,
+        sens=payload.sens or "entree",
+        employe_id=employe.id,
+        nom=employe.nom or "",
+    )
+
     return {
         "autorise": True,
         "employe_id": employe.id,
         "nom": employe.nom,
         "message": "Carte valide. Rendez-vous devant l'écran pour la vérification faciale.",
     }
+
+
+@router.get("/peut-ouvrir")
+async def peut_ouvrir(
+    uidcarte: str,
+    x_porte_secret: str | None = Header(default=None),
+):
+    """
+    Polling ESP32 : après un scan carte OK, l'ESP32 interroge cet endpoint
+    jusqu'à ce que le visage soit validé (ou timeout côté ESP).
+    """
+    _verifier_secret_porte(x_porte_secret)
+    clear_old(90)
+
+    uid = _normaliser_uid(uidcarte)
+    p = get_pending(uid)
+
+    if not p:
+        return {"peut_ouvrir": False, "raison": "aucune_demande"}
+
+    if not p.authorized:
+        return {
+            "peut_ouvrir": False,
+            "raison": "en_attente_visage",
+            "sens": p.sens,
+            "nom": p.nom,
+        }
+
+    # One-shot : on consomme pour éviter une double ouverture
+    consumed = consume_if_authorized(uid)
+    if not consumed:
+        return {"peut_ouvrir": False, "raison": "deja_consomme"}
+
+    return {
+        "peut_ouvrir": True,
+        "sens": consumed.sens,
+        "employe_id": consumed.employe_id,
+        "nom": consumed.nom,
+    }
+
+
+@router.post("/annuler")
+async def annuler_ouverture(
+    payload: VerifCarteRequest,
+    x_porte_secret: str | None = Header(default=None),
+):
+    """Optionnel : l'ESP32 peut annuler une demande si timeout visage."""
+    _verifier_secret_porte(x_porte_secret)
+    uid = _normaliser_uid(payload.uidcarte)
+    clear_pending(uid)
+    return {"ok": True}
+

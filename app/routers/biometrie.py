@@ -1,4 +1,3 @@
-# app/routers/biometrie.py
 """
 Identique à l'original, SAUF :
   - les imports de app.core.biometrie -> app.core.face_client (appel HTTP
@@ -57,6 +56,7 @@ from app.core.face_client import (
     visage_correspond,
 )
 from app.core.biometrie_hooks import nettoyer_biometrie_employe
+from app.core.porte_pending import mark_authorized
 from app.core.security import require_admin
 from app.core.ws_manager import manager
 from app.db.database import get_db
@@ -72,6 +72,20 @@ from app.db.models import (
 
 router = APIRouter(prefix="/api/biometrie", tags=["biometrie"])
 limiter = Limiter(key_func=get_remote_address)
+
+
+def _normaliser_uid(uid: str) -> str:
+    """UID ESP32 : majuscules, sans espaces / ':' / '-'."""
+    return (
+        (uid or "")
+        .strip()
+        .upper()
+        .replace(" ", "")
+        .replace(":", "")
+        .replace("-", "")
+    )
+
+
 
 
 def _verifier_secret_ecran(x_ecran_secret: str | None):
@@ -380,6 +394,9 @@ async def verifier_visage_entree(
         "action": "entree",
     })
 
+    # Signale à l'ESP32 (via /api/porte/peut-ouvrir) que le visage est validé
+    mark_authorized(_normaliser_uid(uidcarte))
+
     return {
         "result": "AUTHORIZED",
         "action": "entree",
@@ -503,6 +520,8 @@ async def verifier_visage_sortie(
     if duree_minutes is not None:
         response["duree_minutes"] = duree_minutes
 
+    # Signale à l'ESP32 (via /api/porte/peut-ouvrir) que le visage est validé
+    mark_authorized(_normaliser_uid(uidcarte))
     return response
 
 
@@ -641,6 +660,8 @@ async def verifier_visage(
     if duree_minutes is not None:
         response["duree_minutes"] = duree_minutes
 
+    # Signale à l'ESP32 (via /api/porte/peut-ouvrir) que le visage est validé
+    mark_authorized(_normaliser_uid(uidcarte))
     return response
 
 
