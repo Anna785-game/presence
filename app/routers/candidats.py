@@ -33,7 +33,7 @@ limiter = Limiter(key_func=get_remote_address)
 # `choisir_poste` ci-dessous, et arrêter d'appeler
 # `_attribuer_carte_automatique` (revenir à l'attribution manuelle via
 # app/routers/cartes.py ou l'écran, comme avant).
-CARTES_FIXES_UID = ["F38E296F", "8BE8286F"]
+CARTES_FIXES_UID = ["F38E296F", "8BE8286F", "AA837C05", "F3780307"]
 
 
 async def _assurer_cartes_fixes(db: AsyncSession) -> list[Carterfid]:
@@ -74,7 +74,7 @@ async def _attribuer_carte_automatique(db: AsyncSession, employe: Employe) -> Ca
 
     raise HTTPException(
         409,
-        "Les 2 cartes disponibles sont déjà attribuées à des employés actifs. "
+        f"Les {len(CARTES_FIXES_UID)} cartes disponibles sont déjà attribuées à des employés actifs. "
         "Il faut en libérer une (licenciement) avant de pouvoir en attribuer une nouvelle.",
     )
 
@@ -441,8 +441,8 @@ async def accepter(candidat_id: int, db: AsyncSession = Depends(get_db)):
     if candidat.statut != "attente":
         raise HTTPException(409, "Ce candidat n'est pas en attente")
 
-    # Jusqu'à 3 candidats actifs en parallèle (plus d'index unique en BDD)
-    MAX_ACTIFS = 3
+    # Jusqu'à 4 candidats actifs en parallèle (plus d'index unique en BDD)
+    MAX_ACTIFS = 4
     nb_actifs = (
         await db.execute(
             select(func.count()).select_from(Candidat).where(Candidat.statut == "actif")

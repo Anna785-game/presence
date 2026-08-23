@@ -2,7 +2,26 @@
 Endpoint dédié aux boîtiers physiques ESP32 (2 lecteurs RFID + servos +
 LCD + LEDs), PAS au kiosque sys_ecran.
 
-Rôle :
+RECONNAISSANCE FACIALE DÉSACTIVÉE TEMPORAIREMENT (voir aussi
+app/routers/candidats.py) : /verifier-carte n'attend plus la validation
+faciale pour ouvrir la porte. La carte seule fait foi : dès qu'elle est
+reconnue et assignée à un employé actif, on enregistre directement
+l'entrée/sortie (PresenceEntree / Sortie / Presence, comme le faisaient
+avant /api/biometrie/verify-entree et /verify-sortie) et on autorise
+l'ouverture immédiatement (plus besoin que l'ESP32 attende via
+/peut-ouvrir : la réponse revient déjà "peut_ouvrir": true implicitement,
+mais on garde quand même le mécanisme create_pending + mark_authorized
+tel quel pour ne pas avoir à reflasher le firmware ESP32, qui continue
+d'appeler /peut-ouvrir en polling comme avant — il obtiendra juste la
+réponse positive dès le premier poll au lieu d'attendre le visage).
+
+Pour réactiver la reconnaissance faciale plus tard : chercher le bloc
+"RECONNAISSANCE FACIALE DÉSACTIVÉE" ci-dessous et remettre la logique
+d'origine (ne créer que le pending, sans toucher aux tables de présence
+ni appeler mark_authorized ici — c'est /api/biometrie/verify-entree et
+/verify-sortie qui doivent alors s'en charger, comme avant).
+
+Rôle (inchangé par ailleurs) :
   - Vérifier que la carte est connue et assignée à un employé actif
     → ouverture porte + broadcast porte_carte_ok (écran facial).
   - Si la carte est inconnue → l'enregistrer automatiquement dans
@@ -12,11 +31,10 @@ Rôle :
   - Si la carte est connue mais non assignée → refus + broadcast
     carte_libre_scannee (déjà en base, encore libre).
 
-Ne touche PAS à carte.isentree ni aux tables de présence : c'est
-sys_ecran + /api/biometrie/verify qui enregistrent l'entrée/sortie.
-
 Auth : header X-Porte-Secret (= settings.PORTE_SHARED_SECRET).
 """
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -29,10 +47,12 @@ from app.core.porte_pending import (
     consume_if_authorized,
     create_pending,
     get_pending,
+    mark_authorized,
 )
+from app.core.time_utils import aujourdhui as _aujourdhui, maintenant as _maintenant
 from app.core.ws_manager import manager
 from app.db.database import get_db
-from app.db.models import Carterfid, Employe
+from app.db.models import Carterfid, Employe, Presence, PresenceEntree, Sortie
 
 router = APIRouter(prefix="/api/porte", tags=["porte"])
 
@@ -56,8 +76,116 @@ def _normaliser_uid(uid: str) -> str:
 
 class VerifCarteRequest(BaseModel):
     uidcarte: str
-    # "entree" | "sortie" : informatif (logs + message WS)
+    # "entree" | "sortie" : détermine le sens enregistré
     sens: str | None = None
+
+
+async def _enregistrer_entree(db: AsyncSession, employe: Employe, carte: Carterfid) -> dict:
+    """Reprend la logique de app/routers/biometrie.py::verifier_visage_entree,
+    sans la vérification de visage (désactivée temporairement)."""
+    aujourdhui = _aujourdhui()
+    heure_actuelle = _maintenant().time()
+    heure_str = heure_actuelle.strftime("%H:%M:%S")
+
+    entree = PresenceEntree(
+        id_employe=employe.id,
+        date=aujourdhui,
+        heure_entree=heure_actuelle,
+        ack=True,
+    )
+    carte.isentree = True
+
+    presence = (
+        await db.execute(
+            select(Presence).where(
+                Presence.id_employe == employe.id,
+                Presence.datedujour == aujourdhui,
+            )
+        )
+    ).scalar_one_or_none()
+    if not presence:
+        presence = Presence(id_employe=employe.id, datedujour=aujourdhui, statut="present")
+        db.add(presence)
+    db.add(entree)
+    await db.commit()
+
+    await manager.broadcast({
+        "event": "entree_entreprise",
+        "message": f"{employe.nom} est entré dans l'entreprise.",
+        "employe_id": employe.id,
+        "nom": employe.nom,
+        "via": "carte",
+        "heure": heure_str,
+        "action": "entree",
+    })
+    return {"heure": heure_str}
+
+
+async def _enregistrer_sortie(db: AsyncSession, employe: Employe, carte: Carterfid) -> dict:
+    """Reprend la logique de app/routers/biometrie.py::verifier_visage_sortie,
+    sans la vérification de visage (désactivée temporairement)."""
+    aujourdhui = _aujourdhui()
+    heure_actuelle = _maintenant().time()
+    heure_str = heure_actuelle.strftime("%H:%M:%S")
+
+    sortie = Sortie(id_employe=employe.id, date=aujourdhui, heure_sortie=heure_actuelle)
+    carte.isentree = False
+    db.add(sortie)
+
+    heure_entree_str = None
+    duree_minutes = None
+    derniere_entree = (
+        await db.execute(
+            select(PresenceEntree)
+            .where(PresenceEntree.id_employe == employe.id, PresenceEntree.date == aujourdhui)
+            .order_by(PresenceEntree.heure_entree.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+    if derniere_entree:
+        heure_entree_str = derniere_entree.heure_entree.strftime("%H:%M:%S")
+        entree_dt = datetime.combine(aujourdhui, derniere_entree.heure_entree)
+        sortie_dt = datetime.combine(aujourdhui, heure_actuelle)
+        duree_minutes = max(0, int((sortie_dt - entree_dt).total_seconds() // 60))
+
+        presence = (
+            await db.execute(
+                select(Presence).where(
+                    Presence.id_employe == employe.id,
+                    Presence.datedujour == aujourdhui,
+                )
+            )
+        ).scalar_one_or_none()
+        if presence:
+            presence.dureetravail = (presence.dureetravail or 0) + duree_minutes
+        else:
+            db.add(
+                Presence(
+                    id_employe=employe.id,
+                    datedujour=aujourdhui,
+                    statut="present",
+                    dureetravail=duree_minutes,
+                )
+            )
+
+    await db.commit()
+
+    payload_ws = {
+        "event": "sortie_entreprise",
+        "message": f"{employe.nom} est sorti de l'entreprise.",
+        "employe_id": employe.id,
+        "nom": employe.nom,
+        "via": "carte",
+        "heure": heure_str,
+        "action": "sortie",
+    }
+    if heure_entree_str:
+        payload_ws["heure_entree"] = heure_entree_str
+    if duree_minutes is not None:
+        payload_ws["duree_minutes"] = duree_minutes
+    await manager.broadcast(payload_ws)
+    return {"heure": heure_str}
 
 
 @router.post("/verifier-carte")
@@ -128,15 +256,34 @@ async def verifier_carte(
             "employe_id": employe.id,
         }
 
-    # --- OK : employé actif ---
-    sens_label = (
-        "entrée"
-        if payload.sens == "entree"
-        else "sortie"
-        if payload.sens == "sortie"
-        else "accès"
-    )
+    sens = payload.sens if payload.sens in ("entree", "sortie") else "entree"
+
+    # --- RECONNAISSANCE FACIALE DÉSACTIVÉE : la carte seule fait foi -----
+    # On refuse un sens incohérent avec l'état actuel de la carte (comme le
+    # faisaient /verify-entree et /verify-sortie), pour éviter une double
+    # entrée ou une sortie fantôme.
+    if sens == "entree" and carte.isentree:
+        return {
+            "autorise": False,
+            "raison": "deja_entre",
+            "employe_id": employe.id,
+            "message": f"{employe.nom} est déjà marqué comme entré. Utilisez le lecteur de sortie.",
+        }
+    if sens == "sortie" and not carte.isentree:
+        return {
+            "autorise": False,
+            "raison": "pas_encore_entre",
+            "employe_id": employe.id,
+            "message": f"{employe.nom} n'est pas marqué comme entré. Utilisez le lecteur d'entrée.",
+        }
+
+    if sens == "entree":
+        detail = await _enregistrer_entree(db, employe, carte)
+    else:
+        detail = await _enregistrer_sortie(db, employe, carte)
+
     nom_affiche = (employe.nom or "").strip() or "Employé"
+    sens_label = "entrée" if sens == "entree" else "sortie"
 
     await manager.broadcast(
         {
@@ -145,27 +292,23 @@ async def verifier_carte(
             "employe_id": employe.id,
             "nom": employe.nom,
             "prenom": employe.prenom,
-            "sens": payload.sens,
-            "message": (
-                f"{nom_affiche}, placez-vous devant l'écran pour la "
-                f"vérification faciale ({sens_label})."
-            ),
+            "sens": sens,
+            "message": f"{nom_affiche} — {sens_label} autorisée ({detail['heure']}).",
         }
     )
 
-    # Demande d'ouverture en attente de validation faciale (polling ESP32)
-    create_pending(
-        uid=carte.uidcarte,
-        sens=payload.sens or "entree",
-        employe_id=employe.id,
-        nom=employe.nom or "",
-    )
+    # Autorise l'ouverture tout de suite (l'ESP32 continue de poller
+    # /peut-ouvrir sans modification, il obtiendra juste true dès le
+    # premier appel au lieu d'attendre une validation faciale).
+    create_pending(uid=carte.uidcarte, sens=sens, employe_id=employe.id, nom=employe.nom or "")
+    mark_authorized(carte.uidcarte)
 
     return {
         "autorise": True,
         "employe_id": employe.id,
         "nom": employe.nom,
-        "message": "Carte valide. Rendez-vous devant l'écran pour la vérification faciale.",
+        "sens": sens,
+        "message": f"Carte valide. {sens_label.capitalize()} enregistrée.",
     }
 
 
@@ -175,8 +318,11 @@ async def peut_ouvrir(
     x_porte_secret: str | None = Header(default=None),
 ):
     """
-    Polling ESP32 : après un scan carte OK, l'ESP32 interroge cet endpoint
-    jusqu'à ce que le visage soit validé (ou timeout côté ESP).
+    Polling ESP32 : après un scan carte OK, l'ESP32 interroge cet endpoint.
+    Reconnaissance faciale désactivée : /verifier-carte a déjà autorisé et
+    marqué la demande (mark_authorized) au moment du scan, donc ce endpoint
+    répondra "peut_ouvrir": true dès le premier poll — le firmware ESP32
+    n'a besoin d'aucune modification.
     """
     _verifier_secret_porte(x_porte_secret)
     clear_old(90)
@@ -218,4 +364,3 @@ async def annuler_ouverture(
     uid = _normaliser_uid(payload.uidcarte)
     clear_pending(uid)
     return {"ok": True}
-
