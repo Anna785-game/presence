@@ -21,14 +21,77 @@ router = APIRouter(prefix="/candidats", tags=["candidats"])
 limiter = Limiter(key_func=get_remote_address)
 
 
+# --- Reconnaissance faciale désactivée temporairement --------------------
+# Le matériel / la reconnaissance faciale n'est pas encore prête. En
+# attendant, on utilise 2 cartes RFID PERMANENTES (fabriquées une bonne
+# fois pour toutes) qui sont attribuées automatiquement dès que le
+# candidat choisit son poste, sans passer par l'enrôlement du visage ni
+# par la remise physique manuelle (écran / admin).
+#
+# Pour réactiver la reconnaissance faciale plus tard : remettre la
+# vérification `if not face_row: raise HTTPException(...)` dans
+# `choisir_poste` ci-dessous, et arrêter d'appeler
+# `_attribuer_carte_automatique` (revenir à l'attribution manuelle via
+# app/routers/cartes.py ou l'écran, comme avant).
+CARTES_FIXES_UID = ["F38E296F", "8BE8286F"]
+
+
+async def _assurer_cartes_fixes(db: AsyncSession) -> list[Carterfid]:
+    """
+    Garantit que les 2 cartes RFID permanentes existent en base (créées
+    au tout premier appel si besoin, puis simplement relues ensuite).
+    """
+    cartes = []
+    for uid in CARTES_FIXES_UID:
+        carte = (
+            await db.execute(select(Carterfid).where(Carterfid.uidcarte == uid))
+        ).scalar_one_or_none()
+        if not carte:
+            carte = Carterfid(uidcarte=uid, isentree=False)
+            db.add(carte)
+            await db.flush()
+        cartes.append(carte)
+    return cartes
+
+
+async def _attribuer_carte_automatique(db: AsyncSession, employe: Employe) -> Carterfid:
+    """
+    Attribue à `employe` la première des 2 cartes fixes qui n'est pas déjà
+    liée à un autre employé. Lève 409 si les 2 sont déjà prises (aucune
+    n'a encore été libérée par un licenciement, voir virer_manuellement
+    ci-dessous qui remet employe.carterfid_id à None).
+    Ne fait PAS le commit : à faire dans le même commit que le choix du
+    poste, pour rester atomique.
+    """
+    cartes = await _assurer_cartes_fixes(db)
+    for carte in cartes:
+        deja_prise = (
+            await db.execute(select(Employe).where(Employe.carterfid_id == carte.id))
+        ).scalar_one_or_none()
+        if not deja_prise:
+            employe.carterfid_id = carte.id
+            return carte
+
+    raise HTTPException(
+        409,
+        "Les 2 cartes disponibles sont déjà attribuées à des employés actifs. "
+        "Il faut en libérer une (licenciement) avant de pouvoir en attribuer une nouvelle.",
+    )
+
+
 async def _avec_visage_enrole(db: AsyncSession, candidat: Candidat) -> Candidat:
     """
-    Attache un attribut `visage_enrole` (non mappé en base) au candidat, lu
-    ensuite par CandidatOut. Sert au téléphone du visiteur à savoir s'il
-    doit encore aller enrôler son visage, ou s'il peut directement choisir
-    son poste (voir /candidats/{id}/choisir-poste).
+    Attache 2 attributs non mappés en base au candidat, lus ensuite par
+    CandidatOut :
+      - `visage_enrole` : conservé pour compat (toujours False tant que la
+        reconnaissance faciale est désactivée, voir plus haut), au cas où
+        un vieux visage aurait quand même été enrôlé via /enroll (admin).
+      - `carte_uid` : l'UID de la carte RFID attribuée automatiquement,
+        affiché au candidat une fois son poste choisi (voir Parcours.jsx
+        côté systeme_presence_user).
     """
     visage = False
+    carte_uid = None
     if candidat.employe_id:
         existant = (
             await db.execute(
@@ -36,7 +99,14 @@ async def _avec_visage_enrole(db: AsyncSession, candidat: Candidat) -> Candidat:
             )
         ).scalar_one_or_none()
         visage = existant is not None
+
+        employe = await db.get(Employe, candidat.employe_id)
+        if employe and employe.carterfid_id:
+            carte = await db.get(Carterfid, employe.carterfid_id)
+            carte_uid = carte.uidcarte if carte else None
+
     candidat.visage_enrole = visage
+    candidat.carte_uid = carte_uid
     return candidat
 
 # --- Public : inscription visiteur ---
@@ -101,10 +171,10 @@ async def mon_statut(candidat_id: int, db: AsyncSession = Depends(get_db)):
 async def postes_disponibles(db: AsyncSession = Depends(get_db)):
     """
     Liste publique (pas d'auth admin) des postes que le candidat peut
-    choisir depuis son téléphone, une fois son visage enrôlé. Remplace
-    l'ancienne roulette : ce n'est plus un tirage au sort, mais un choix
-    explicite parmi les postes configurés côté admin (voir
-    app/routers/postes.py, panneau "Postes" du back-office).
+    choisir depuis son téléphone. Remplace l'ancienne roulette : ce n'est
+    plus un tirage au sort, mais un choix explicite parmi les postes
+    configurés côté admin (voir app/routers/postes.py, panneau "Postes"
+    du back-office).
     """
     postes = (await db.execute(select(Poste).order_by(Poste.id))).scalars().all()
     return [{"id": p.id, "type_poste": p.type_poste} for p in postes]
@@ -113,10 +183,14 @@ async def postes_disponibles(db: AsyncSession = Depends(get_db)):
 @router.post("/{candidat_id}/choisir-poste", response_model=CandidatOut)
 async def choisir_poste(candidat_id: int, payload: dict, db: AsyncSession = Depends(get_db)):
     """
-    Le candidat choisit lui-même son poste depuis son téléphone, une fois
-    son visage enrôlé (voir app/routers/biometrie.py::enroll_visage_public).
-    Comme /mon-statut et /api/biometrie/enroll-public, l'identifiant du
-    candidat suffit comme "credential" publique.
+    Le candidat choisit lui-même son poste depuis son téléphone.
+
+    RECONNAISSANCE FACIALE DÉSACTIVÉE TEMPORAIREMENT : contrairement à la
+    version précédente, on n'exige plus `visage_enrole` avant de choisir
+    un poste (plus de redirection vers /enrolement côté front). Dès le
+    poste choisi, une carte RFID est attribuée automatiquement parmi les
+    2 cartes fixes (voir _attribuer_carte_automatique ci-dessus) — il n'y
+    a donc plus besoin que l'admin ou l'écran remette une carte à la main.
     """
     poste_id = (payload or {}).get("poste_id")
     if not poste_id:
@@ -134,12 +208,6 @@ async def choisir_poste(candidat_id: int, payload: dict, db: AsyncSession = Depe
     if not employe:
         raise HTTPException(404, "Employé introuvable pour ce candidat")
 
-    face_row = (
-        await db.execute(select(FaceEncoding).where(FaceEncoding.employe_id == employe.id))
-    ).scalar_one_or_none()
-    if not face_row:
-        raise HTTPException(409, "Le visage doit être enrôlé avant de choisir un poste")
-
     if employe.id_poste is not None:
         raise HTTPException(409, "Un poste a déjà été choisi pour cet employé")
 
@@ -149,6 +217,12 @@ async def choisir_poste(candidat_id: int, payload: dict, db: AsyncSession = Depe
 
     employe.id_poste = poste.id
     candidat.poste_attribue = poste.type_poste
+
+    # Attribution automatique d'une des 2 cartes fixes (lève 409 si les 2
+    # sont déjà prises). Fait AVANT le commit pour que tout soit atomique :
+    # si l'attribution échoue, le poste n'est pas non plus enregistré.
+    carte = await _attribuer_carte_automatique(db, employe)
+
     await db.commit()
     await db.refresh(candidat)
     await db.refresh(employe)
@@ -160,12 +234,19 @@ async def choisir_poste(candidat_id: int, payload: dict, db: AsyncSession = Depe
         "candidat": {"id": candidat.id, "nom": candidat.nom},
     })
     await manager.broadcast({
+        "event": "carte_assignee",
+        "employe_id": employe.id,
+        "carte_uid": carte.uidcarte,
+        "candidat": {"id": candidat.id, "nom": candidat.nom},
+        "message": f"Carte {carte.uidcarte} attribuée automatiquement à {candidat.nom}.",
+    })
+    await manager.broadcast({
         "event": "employe_actif",
         "employe_id": employe.id,
         "poste": poste.type_poste,
         "message": (
-            f"Félicitations ! Vous êtes maintenant employé en tant que {poste.type_poste}"
-            f"Demandez maintenant votre carte à l'administration."
+            f"Félicitations ! Vous êtes maintenant employé en tant que {poste.type_poste}. "
+            f"Votre carte ({carte.uidcarte}) vous a été attribuée automatiquement."
         ),
     })
 
@@ -185,16 +266,11 @@ async def tache_active_ecran(
     x_ecran_secret: str | None = Header(default=None),
 ):
     """
-    Route dédiée à l'écran kiosque. Contrairement à /candidats (GET, admin),
-    pas de require_admin ici : un secret statique suffit, car l'écran doit
-    tourner en continu pendant toute l'expo sans qu'un JWT expire au bout
-    d'1h. Ne renvoie que le strict nécessaire (pas la liste complète).
-
-    L'enrôlement du visage se fait maintenant sur le téléphone du candidat
-    (voir app/routers/biometrie.py::enroll_visage_public), donc cette route
-    ne sert plus à détecter "qui doit s'enrôler" mais "qui doit recevoir sa
-    carte physique" : un candidat actif, avec un employé qui a déjà un
-    poste (choisi par le candidat lui-même) mais pas encore de carterfid_id.
+    Route dédiée à l'écran kiosque. RECONNAISSANCE FACIALE DÉSACTIVÉE /
+    ATTRIBUTION AUTOMATIQUE DE CARTE : comme la carte est maintenant
+    attribuée automatiquement dans choisir_poste ci-dessus, il n'y a en
+    principe plus jamais personne "en attente de carte" via ce chemin.
+    Conservée telle quelle (inoffensive) pour compat / dépannage.
     """
     _verifier_secret_ecran(x_ecran_secret)
 
@@ -229,11 +305,9 @@ async def attribuer_carte_ecran(
     x_ecran_secret: str | None = Header(default=None),
 ):
     """
-    Associe une carte RFID physique à l'employé actuellement en attente
-    (voir tache_active_ecran ci-dessus), scannée sur le lecteur branché à
-    l'écran kiosque. Équivalent de /api/scan-simulation (app/routers/
-    pointage.py), mais protégé par le secret écran plutôt qu'un JWT admin,
-    puisque c'est désormais l'écran — et non l'admin — qui remet la carte.
+    Conservée pour compat / dépannage manuel (ex. si l'attribution
+    automatique a échoué faute de carte libre et qu'on veut forcer après
+    avoir libéré une carte). N'est plus le chemin normal.
     """
     _verifier_secret_ecran(x_ecran_secret)
 
@@ -267,7 +341,7 @@ async def attribuer_carte_ecran(
     if not ligne:
         raise HTTPException(
             409,
-            "Aucun candidat en attente de carte (visage pas encore enrôlé côté téléphone ?)",
+            "Aucun candidat en attente de carte.",
         )
     candidat, employe = ligne
 
@@ -280,7 +354,7 @@ async def attribuer_carte_ecran(
         "employe_id": employe.id,
         "carte_uid": carte.uidcarte,
         "candidat": {"id": candidat.id, "nom": candidat.nom},
-        "message": f"Carte remise à {candidat.nom}. Passage devant la caméra pour entrer.",
+        "message": f"Carte remise à {candidat.nom}.",
     })
 
     return {
@@ -297,7 +371,8 @@ async def attribuer_carte_ecran(
 @router.get("", response_model=list[CandidatOut], dependencies=[Depends(require_admin)])
 async def liste_candidats(db: AsyncSession = Depends(get_db)):
     stmt = select(Candidat).where(Candidat.statut != "historique").order_by(Candidat.heure_inscription)
-    return (await db.execute(stmt)).scalars().all()
+    candidats = (await db.execute(stmt)).scalars().all()
+    return [await _avec_visage_enrole(db, c) for c in candidats]
 
 
 @router.get("/historique", response_model=list[CandidatOut], dependencies=[Depends(require_admin)])
@@ -318,7 +393,9 @@ async def virer_manuellement(candidat_id: int, db: AsyncSession = Depends(get_db
 
     - Passe le candidat en "historique"
     - Passe l'employé en "Inactif"
-    - Détache la carte RFID
+    - Détache la carte RFID (elle redevient disponible pour un futur
+      candidat, voir _attribuer_carte_automatique ci-dessus : c'est
+      exactement le mécanisme de libération demandé)
     - Broadcast l'événement
     """
     candidat = await db.get(Candidat, candidat_id)
@@ -380,11 +457,9 @@ async def accepter(candidat_id: int, db: AsyncSession = Depends(get_db)):
     candidat.statut = "actif"
     candidat.heure_acceptation = datetime.now(timezone.utc)
 
-    # L'employé est créé MAINTENANT, sans poste ni carte : ça permet au
-    # téléphone du visiteur d'enrôler son visage juste après (l'enrôlement
-    # a besoin d'un employe_id valide). Une fois le visage enrôlé, c'est le
-    # candidat qui choisit lui-même son poste, voir
-    # app/routers/candidats.py::choisir_poste.
+    # L'employé est créé MAINTENANT, sans poste ni carte : le candidat
+    # passe directement à /choisir-poste (plus d'étape d'enrôlement du
+    # visage tant que la reconnaissance faciale est désactivée).
     employe = Employe(
         nom=candidat.nom,
         matricule=_generer_matricule(candidat.id),
@@ -405,7 +480,7 @@ async def accepter(candidat_id: int, db: AsyncSession = Depends(get_db)):
         "event": "candidat_actif",
         "candidat": {"id": candidat.id, "nom": candidat.nom},
         "employe_id": employe.id,
-        "message": "Veuillez enregistrer votre visage pour devenir employé.",
+        "message": "Veuillez choisir votre poste.",
     })
 
     return candidat

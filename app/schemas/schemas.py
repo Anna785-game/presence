@@ -134,8 +134,12 @@ class CandidatOut(BaseModel):
     # Rempli une fois le candidat accepté et promu en employé.
     # Reste renseigné même après passage en "historique".
     employe_id: int | None = None
-    # True une fois que le candidat a enrôlé son visage depuis son téléphone
-    # (voir /api/biometrie/enroll-public). Sert de signal au front visiteur
-    # pour savoir s'il doit encore aller enrôler son visage, ou s'il peut
-    # directement choisir son poste (/candidats/{id}/choisir-poste).
+    # True une fois que le candidat a enrôlé son visage. Reconnaissance
+    # faciale désactivée temporairement : reste False dans le parcours
+    # normal (voir app/routers/candidats.py::choisir_poste). Conservé pour
+    # compat / réactivation future.
     visage_enrole: bool = False
+    # UID de la carte RFID attribuée automatiquement au choix du poste
+    # (une des 2 cartes fixes, voir CARTES_FIXES_UID dans candidats.py).
+    # None tant qu'aucune carte n'a encore été attribuée.
+    carte_uid: str | None = None
