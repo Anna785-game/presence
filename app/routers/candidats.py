@@ -23,47 +23,38 @@ limiter = Limiter(key_func=get_remote_address)
 
 # --- Reconnaissance faciale désactivée temporairement --------------------
 # Le matériel / la reconnaissance faciale n'est pas encore prête. En
-# attendant, on utilise 2 cartes RFID PERMANENTES (fabriquées une bonne
-# fois pour toutes) qui sont attribuées automatiquement dès que le
+# attendant, une carte RFID est attribuée automatiquement dès que le
 # candidat choisit son poste, sans passer par l'enrôlement du visage ni
 # par la remise physique manuelle (écran / admin).
+#
+# CAPACITÉ DYNAMIQUE : la liste des cartes n'est plus une liste fixe de
+# quelques UID codés en dur. On pioche parmi TOUTES les cartes présentes
+# en base (Carterfid), qu'elles aient été enregistrées automatiquement
+# en scannant un badge inconnu au portillon (voir app/routers/porte.py
+# /verifier-carte) ou ajoutées à la main dans le panneau Cartes.
+# Conséquence directe : scanner/ajouter une carte augmente d'autant le
+# nombre de candidats actifs possibles ; en supprimer une le diminue
+# (voir MAX_ACTIFS dynamique dans `accepter` ci-dessous).
 #
 # Pour réactiver la reconnaissance faciale plus tard : remettre la
 # vérification `if not face_row: raise HTTPException(...)` dans
 # `choisir_poste` ci-dessous, et arrêter d'appeler
 # `_attribuer_carte_automatique` (revenir à l'attribution manuelle via
 # app/routers/cartes.py ou l'écran, comme avant).
-CARTES_FIXES_UID = ["F38E296F", "8BE8286F", "AA837C05", "F3780307"]
-
-
-async def _assurer_cartes_fixes(db: AsyncSession) -> list[Carterfid]:
-    """
-    Garantit que les 2 cartes RFID permanentes existent en base (créées
-    au tout premier appel si besoin, puis simplement relues ensuite).
-    """
-    cartes = []
-    for uid in CARTES_FIXES_UID:
-        carte = (
-            await db.execute(select(Carterfid).where(Carterfid.uidcarte == uid))
-        ).scalar_one_or_none()
-        if not carte:
-            carte = Carterfid(uidcarte=uid, isentree=False)
-            db.add(carte)
-            await db.flush()
-        cartes.append(carte)
-    return cartes
 
 
 async def _attribuer_carte_automatique(db: AsyncSession, employe: Employe) -> Carterfid:
     """
-    Attribue à `employe` la première des 2 cartes fixes qui n'est pas déjà
-    liée à un autre employé. Lève 409 si les 2 sont déjà prises (aucune
-    n'a encore été libérée par un licenciement, voir virer_manuellement
-    ci-dessous qui remet employe.carterfid_id à None).
+    Attribue à `employe` la première carte RFID libre trouvée parmi
+    TOUTES les cartes enregistrées en base (peu importe leur origine).
+    Lève 409 si aucune carte n'est libre (aucune n'a encore été libérée
+    par un licenciement, voir virer_manuellement ci-dessous qui remet
+    employe.carterfid_id à None, ou aucune nouvelle carte n'a été
+    scannée/ajoutée).
     Ne fait PAS le commit : à faire dans le même commit que le choix du
     poste, pour rester atomique.
     """
-    cartes = await _assurer_cartes_fixes(db)
+    cartes = (await db.execute(select(Carterfid).order_by(Carterfid.id))).scalars().all()
     for carte in cartes:
         deja_prise = (
             await db.execute(select(Employe).where(Employe.carterfid_id == carte.id))
@@ -74,8 +65,9 @@ async def _attribuer_carte_automatique(db: AsyncSession, employe: Employe) -> Ca
 
     raise HTTPException(
         409,
-        f"Les {len(CARTES_FIXES_UID)} cartes disponibles sont déjà attribuées à des employés actifs. "
-        "Il faut en libérer une (licenciement) avant de pouvoir en attribuer une nouvelle.",
+        f"Les {len(cartes)} carte(s) RFID enregistrée(s) sont déjà toutes attribuées à des employés actifs. "
+        "Scannez une nouvelle carte au portillon (ou ajoutez-en une dans le panneau Cartes), "
+        "ou libérez-en une (licenciement) avant de pouvoir en attribuer une nouvelle.",
     )
 
 
@@ -441,17 +433,30 @@ async def accepter(candidat_id: int, db: AsyncSession = Depends(get_db)):
     if candidat.statut != "attente":
         raise HTTPException(409, "Ce candidat n'est pas en attente")
 
-    # Jusqu'à 4 candidats actifs en parallèle (plus d'index unique en BDD)
-    MAX_ACTIFS = 4
+    # Capacité dynamique : autant de candidats actifs en parallèle que de
+    # cartes RFID enregistrées en base (scannées au portillon ou ajoutées
+    # à la main dans le panneau Cartes). +1 carte = +1 candidat actif
+    # possible, -1 carte = -1.
+    nb_cartes = (
+        await db.execute(select(func.count()).select_from(Carterfid))
+    ).scalar_one()
     nb_actifs = (
         await db.execute(
             select(func.count()).select_from(Candidat).where(Candidat.statut == "actif")
         )
     ).scalar_one()
-    if nb_actifs >= MAX_ACTIFS:
+    if nb_cartes == 0:
         raise HTTPException(
             409,
-            f"Déjà {MAX_ACTIFS} candidats actifs. Retire-en un avant d'en accepter un autre.",
+            "Aucune carte RFID enregistrée. Scannez au moins une carte au portillon "
+            "(ou ajoutez-en une dans le panneau Cartes) avant d'accepter un candidat.",
+        )
+    if nb_actifs >= nb_cartes:
+        raise HTTPException(
+            409,
+            f"Déjà {nb_actifs}/{nb_cartes} candidats actifs — autant que de cartes RFID "
+            "enregistrées. Scannez/ajoutez une carte de plus, ou retire un candidat actif, "
+            "avant d'en accepter un autre.",
         )
 
     candidat.statut = "actif"
@@ -538,4 +543,17 @@ async def stats(db: AsyncSession = Depends(get_db)):
     deja_passes = (await db.execute(
         select(func.count()).select_from(Candidat).where(Candidat.statut == "historique")
     )).scalar()
-    return {"en_attente": en_attente, "deja_passes": deja_passes}
+    nb_actifs = (await db.execute(
+        select(func.count()).select_from(Candidat).where(Candidat.statut == "actif")
+    )).scalar()
+    # Capacité dynamique = nombre de cartes RFID enregistrées en base (voir
+    # `accepter` et `_attribuer_carte_automatique` plus haut).
+    max_actifs = (await db.execute(
+        select(func.count()).select_from(Carterfid)
+    )).scalar()
+    return {
+        "en_attente": en_attente,
+        "deja_passes": deja_passes,
+        "nb_actifs": nb_actifs,
+        "max_actifs": max_actifs,
+    }

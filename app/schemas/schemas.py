@@ -140,6 +140,7 @@ class CandidatOut(BaseModel):
     # compat / réactivation future.
     visage_enrole: bool = False
     # UID de la carte RFID attribuée automatiquement au choix du poste
-    # (une des 2 cartes fixes, voir CARTES_FIXES_UID dans candidats.py).
+    # (première carte libre parmi toutes celles enregistrées en base,
+    # voir _attribuer_carte_automatique dans candidats.py).
     # None tant qu'aucune carte n'a encore été attribuée.
     carte_uid: str | None = None

@@ -27,6 +27,14 @@ async def create_carte(payload: CarterfidCreate, db: AsyncSession = Depends(get_
     db.add(carte)
     await db.commit()
     await db.refresh(carte)
+
+    await manager.broadcast({
+        "event": "carte_creee",
+        "carte_id": carte.id,
+        "carte_uid": carte.uidcarte,
+        "message": f"Carte {carte.uidcarte} ajoutée manuellement.",
+    })
+
     return carte
 
 
@@ -41,8 +49,16 @@ async def delete_carte(carte_id: int, db: AsyncSession = Depends(get_db)):
     ).scalar_one_or_none()
     if deja:
         raise HTTPException(409, "Cette carte est encore assignée à un employé")
+    uid = carte.uidcarte
     await db.delete(carte)
     await db.commit()
+
+    await manager.broadcast({
+        "event": "carte_supprimee",
+        "carte_id": carte_id,
+        "carte_uid": uid,
+        "message": f"Carte {uid} supprimée.",
+    })
 
 
 @router.get("/en-attente")
