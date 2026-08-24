@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
+from fastapi.responses import JSONResponse
 from slowapi.util import get_remote_address
 from app.routers.historique_jour import router as historique_jour_router
 from app.routers import (
@@ -51,3 +52,7 @@ app.include_router(demo.router)
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request, exc):
+    return JSONResponse(status_code=500, content={"detail": "Erreur interne du serveur."})

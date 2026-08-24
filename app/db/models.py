@@ -33,7 +33,7 @@ class Employe(Base):
     __tablename__ = "employes"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    nom: Mapped[str | None] = mapped_column(String(20))
+    nom: Mapped[str | None] = mapped_column(String(50))
     prenom: Mapped[str | None] = mapped_column(String(20))
     matricule: Mapped[str] = mapped_column(String(15), unique=True, index=True)
     date_embauche: Mapped[date | None] = mapped_column(Date)
