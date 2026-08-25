@@ -1,4 +1,3 @@
-# app/routers/candidats.py
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
@@ -21,26 +20,11 @@ router = APIRouter(prefix="/candidats", tags=["candidats"])
 limiter = Limiter(key_func=get_remote_address)
 
 
-# --- Reconnaissance faciale désactivée temporairement --------------------
-# Le matériel / la reconnaissance faciale n'est pas encore prête. En
-# attendant, une carte RFID est attribuée automatiquement dès que le
-# candidat choisit son poste, sans passer par l'enrôlement du visage ni
-# par la remise physique manuelle (écran / admin).
-#
-# CAPACITÉ DYNAMIQUE : la liste des cartes n'est plus une liste fixe de
-# quelques UID codés en dur. On pioche parmi TOUTES les cartes présentes
-# en base (Carterfid), qu'elles aient été enregistrées automatiquement
-# en scannant un badge inconnu au portillon (voir app/routers/porte.py
-# /verifier-carte) ou ajoutées à la main dans le panneau Cartes.
-# Conséquence directe : scanner/ajouter une carte augmente d'autant le
-# nombre de candidats actifs possibles ; en supprimer une le diminue
-# (voir MAX_ACTIFS dynamique dans `accepter` ci-dessous).
-#
-# Pour réactiver la reconnaissance faciale plus tard : remettre la
-# vérification `if not face_row: raise HTTPException(...)` dans
-# `choisir_poste` ci-dessous, et arrêter d'appeler
-# `_attribuer_carte_automatique` (revenir à l'attribution manuelle via
-# app/routers/cartes.py ou l'écran, comme avant).
+# --- Reconnaissance faciale activée --------------------------------------
+# Le candidat doit enrôler son visage (kiosque) avant de choisir un poste.
+# Ensuite une carte RFID libre est attribuée automatiquement parmi TOUTES
+# les cartes en base (Carterfid) — scannées au portillon ou ajoutées en
+# admin. Voir choisir_poste + _attribuer_carte_automatique.
 
 
 async def _attribuer_carte_automatique(db: AsyncSession, employe: Employe) -> Carterfid:
@@ -177,12 +161,9 @@ async def choisir_poste(candidat_id: int, payload: dict, db: AsyncSession = Depe
     """
     Le candidat choisit lui-même son poste depuis son téléphone.
 
-    RECONNAISSANCE FACIALE DÉSACTIVÉE TEMPORAIREMENT : contrairement à la
-    version précédente, on n'exige plus `visage_enrole` avant de choisir
-    un poste (plus de redirection vers /enrolement côté front). Dès le
-    poste choisi, une carte RFID est attribuée automatiquement parmi les
-    2 cartes fixes (voir _attribuer_carte_automatique ci-dessus) — il n'y
-    a donc plus besoin que l'admin ou l'écran remette une carte à la main.
+    RECONNAISSANCE FACIALE ACTIVÉE : un encoding facial doit exister pour
+    l'employé lié avant de pouvoir choisir un poste. Ensuite une carte
+    RFID libre est attribuée automatiquement.
     """
     poste_id = (payload or {}).get("poste_id")
     if not poste_id:
@@ -199,6 +180,18 @@ async def choisir_poste(candidat_id: int, payload: dict, db: AsyncSession = Depe
     employe = await db.get(Employe, candidat.employe_id)
     if not employe:
         raise HTTPException(404, "Employé introuvable pour ce candidat")
+
+    # Visage obligatoire avant le choix de poste
+    face_row = (
+        await db.execute(
+            select(FaceEncoding).where(FaceEncoding.employe_id == employe.id)
+        )
+    ).scalar_one_or_none()
+    if not face_row:
+        raise HTTPException(
+            409,
+            "Enregistrez d'abord votre visage devant l'écran kiosque.",
+        )
 
     if employe.id_poste is not None:
         raise HTTPException(409, "Un poste a déjà été choisi pour cet employé")

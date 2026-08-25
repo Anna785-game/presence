@@ -2,24 +2,11 @@
 Endpoint dédié aux boîtiers physiques ESP32 (2 lecteurs RFID + servos +
 LCD + LEDs), PAS au kiosque sys_ecran.
 
-RECONNAISSANCE FACIALE DÉSACTIVÉE TEMPORAIREMENT (voir aussi
-app/routers/candidats.py) : /verifier-carte n'attend plus la validation
-faciale pour ouvrir la porte. La carte seule fait foi : dès qu'elle est
-reconnue et assignée à un employé actif, on enregistre directement
-l'entrée/sortie (PresenceEntree / Sortie / Presence, comme le faisaient
-avant /api/biometrie/verify-entree et /verify-sortie) et on autorise
-l'ouverture immédiatement (plus besoin que l'ESP32 attende via
-/peut-ouvrir : la réponse revient déjà "peut_ouvrir": true implicitement,
-mais on garde quand même le mécanisme create_pending + mark_authorized
-tel quel pour ne pas avoir à reflasher le firmware ESP32, qui continue
-d'appeler /peut-ouvrir en polling comme avant — il obtiendra juste la
-réponse positive dès le premier poll au lieu d'attendre le visage).
-
-Pour réactiver la reconnaissance faciale plus tard : chercher le bloc
-"RECONNAISSANCE FACIALE DÉSACTIVÉE" ci-dessous et remettre la logique
-d'origine (ne créer que le pending, sans toucher aux tables de présence
-ni appeler mark_authorized ici — c'est /api/biometrie/verify-entree et
-/verify-sortie qui doivent alors s'en charger, comme avant).
+RECONNAISSANCE FACIALE ACTIVÉE :
+/verifier-carte valide la carte, crée un pending (create_pending) et
+broadcast porte_carte_ok pour le kiosque. L'ouverture n'est autorisée
+qu'après validation du visage via /api/biometrie/verify (mark_authorized).
+L'ESP32 continue de poller /peut-ouvrir comme avant.
 
 Rôle (inchangé par ailleurs) :
   - Vérifier que la carte est connue et assignée à un employé actif
@@ -47,7 +34,6 @@ from app.core.porte_pending import (
     consume_if_authorized,
     create_pending,
     get_pending,
-    mark_authorized,
 )
 from app.core.time_utils import aujourdhui as _aujourdhui, maintenant as _maintenant
 from app.core.ws_manager import manager
@@ -258,10 +244,9 @@ async def verifier_carte(
 
     sens = payload.sens if payload.sens in ("entree", "sortie") else "entree"
 
-    # --- RECONNAISSANCE FACIALE DÉSACTIVÉE : la carte seule fait foi -----
-    # On refuse un sens incohérent avec l'état actuel de la carte (comme le
-    # faisaient /verify-entree et /verify-sortie), pour éviter une double
-    # entrée ou une sortie fantôme.
+    # --- RECONNAISSANCE FACIALE ACTIVÉE ---------------------------------
+    # Cohérence du sens uniquement. Pas d'enregistrement présence ni
+    # mark_authorized ici : c'est /api/biometrie/verify après le visage.
     if sens == "entree" and carte.isentree:
         return {
             "autorise": False,
@@ -277,13 +262,17 @@ async def verifier_carte(
             "message": f"{employe.nom} n'est pas marqué comme entré. Utilisez le lecteur d'entrée.",
         }
 
-    if sens == "entree":
-        detail = await _enregistrer_entree(db, employe, carte)
-    else:
-        detail = await _enregistrer_sortie(db, employe, carte)
-
     nom_affiche = (employe.nom or "").strip() or "Employé"
     sens_label = "entrée" if sens == "entree" else "sortie"
+
+    # Pending en attente de validation faciale (ESP32 pollera /peut-ouvrir)
+    create_pending(
+        uid=carte.uidcarte,
+        sens=sens,
+        employe_id=employe.id,
+        nom=employe.nom or "",
+    )
+    # PAS de mark_authorized ici — le visage le fera
 
     await manager.broadcast(
         {
@@ -293,22 +282,17 @@ async def verifier_carte(
             "nom": employe.nom,
             "prenom": employe.prenom,
             "sens": sens,
-            "message": f"{nom_affiche} — {sens_label} autorisée ({detail['heure']}).",
+            "message": f"{nom_affiche}, placez-vous devant l'écran.",
         }
     )
-
-    # Autorise l'ouverture tout de suite (l'ESP32 continue de poller
-    # /peut-ouvrir sans modification, il obtiendra juste true dès le
-    # premier appel au lieu d'attendre une validation faciale).
-    create_pending(uid=carte.uidcarte, sens=sens, employe_id=employe.id, nom=employe.nom or "")
-    mark_authorized(carte.uidcarte)
 
     return {
         "autorise": True,
         "employe_id": employe.id,
         "nom": employe.nom,
         "sens": sens,
-        "message": f"Carte valide. {sens_label.capitalize()} enregistrée.",
+        "message": f"Carte valide. En attente du visage pour la {sens_label}.",
+        "attente_visage": True,
     }
 
 
@@ -318,11 +302,9 @@ async def peut_ouvrir(
     x_porte_secret: str | None = Header(default=None),
 ):
     """
-    Polling ESP32 : après un scan carte OK, l'ESP32 interroge cet endpoint.
-    Reconnaissance faciale désactivée : /verifier-carte a déjà autorisé et
-    marqué la demande (mark_authorized) au moment du scan, donc ce endpoint
-    répondra "peut_ouvrir": true dès le premier poll — le firmware ESP32
-    n'a besoin d'aucune modification.
+    Polling ESP32 : après un scan carte OK, l'ESP32 interroge cet endpoint
+    jusqu'à ce que le visage soit validé (mark_authorized depuis
+    /api/biometrie/verify) ou timeout.
     """
     _verifier_secret_porte(x_porte_secret)
     clear_old(90)

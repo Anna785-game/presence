@@ -268,6 +268,7 @@ async def _verifier_carte_et_visage(
     Retourne soit un dict {"result": "DENIED", ...} à renvoyer tel quel,
     soit un tuple (carte, employe, dist) si tout est bon.
     """
+    uidcarte = _normaliser_uid(uidcarte)
     carte = (
         await db.execute(select(Carterfid).where(Carterfid.uidcarte == uidcarte))
     ).scalar_one_or_none()
